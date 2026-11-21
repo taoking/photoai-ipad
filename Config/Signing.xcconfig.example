@@ -1,0 +1,6 @@
+// 复制成 Config/Signing.xcconfig 再填（那个文件不进仓库）。
+// Team ID：Xcode → 设置 → 账户 → 选中 Apple ID → 个人团队那一行；
+//   或者 `security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject` 里 OU= 后面那 10 位。
+// Bundle ID：免费账号要全球唯一，随便加个后缀；定下以后不要改（改了就是另一个应用，原来的库不跟过去）。
+DEVELOPMENT_TEAM = ABCDE12345
+PRODUCT_BUNDLE_IDENTIFIER = com.example.photoai.ipad.xxxx

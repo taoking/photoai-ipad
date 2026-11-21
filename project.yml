@@ -1,0 +1,48 @@
+# XcodeGen 配置：`xcodegen generate` 生成 PhotoAI-iPad.xcodeproj（工程文件不进仓库）。
+name: PhotoAI-iPad
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: zh-Hans
+packages:
+  PhotoAICore:
+    path: Packages/PhotoAICore
+targets:
+  PhotoAI-iPad:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: PhotoAICore
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: PhotoAI
+        TARGETED_DEVICE_FAMILY: "2"
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: PhotoAI
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        # 在“文件”App 里能看到 Documents（技术验证日志放这里）。
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+schemes:
+  PhotoAI-iPad:
+    build:
+      targets:
+        PhotoAI-iPad: all
+    run:
+      config: Debug
+    archive:
+      config: Release
