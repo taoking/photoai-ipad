@@ -1,10 +1,11 @@
 import PhotoAICore
 import SwiftUI
 
-/// 侧栏 + 网格（F-10、F-11）。
+/// 侧栏 + 网格（F-10、F-11）；轻点照片进单张视图（F-12）。
 struct RootView: View {
     @Bindable var model: AppModel
     let cache: ThumbnailCache
+    let previews: PreviewImageCache
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -19,8 +20,8 @@ struct RootView: View {
         } message: {
             Text(model.message ?? "")
         }
-        .fullScreenCover(item: $model.openedPhoto) { photo in
-            PreviewViewer(photo: photo, store: model.previewStore)
+        .fullScreenCover(isPresented: Binding(get: { model.isShowingSingle }, set: { if !$0 { model.closeSingle() } })) {
+            SingleView(model: model, thumbnails: cache, previews: previews)
         }
         .task { model.launched() }
         .onChange(of: scenePhase, initial: true) { _, phase in model.scenePhaseChanged(to: phase) }
@@ -97,6 +98,10 @@ struct LibraryScreen: View {
             .overlay {
                 if model.photos.isEmpty { emptyState }
             }
+            .overlay { if !model.isShowingSingle { ToastView(toast: model.toast) } }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.stats.photoCount > 0 { FilterBar(model: model) }
+            }
             .safeAreaInset(edge: .bottom) {
                 ImportStatusBar(model: model, importer: model.importer)
             }
@@ -106,7 +111,8 @@ struct LibraryScreen: View {
     }
 
     private var subtitle: String {
-        var parts = [cardStatus, "\(model.photos.count) 张"]
+        let count = model.currentFilter.isEmpty ? "\(model.photos.count) 张" : "筛选出 \(model.photos.count) / \(model.source.count) 张"
+        var parts = [cardStatus, count]
         if model.stats.missingFromCardCount > 0 { parts.append("卡上已删 \(model.stats.missingFromCardCount) 张") }
         return parts.joined(separator: " · ")
     }
@@ -131,6 +137,12 @@ struct LibraryScreen: View {
                 Button("读取存储卡") { model.readCardTapped() }
                     .buttonStyle(.borderedProminent)
             }
+        } else if !model.currentFilter.isEmpty {
+            ContentUnavailableView {
+                Label("没有符合条件的照片", systemImage: "line.3.horizontal.decrease.circle")
+            } actions: {
+                Button("清除筛选") { model.currentFilter = PhotoFilter() }
+            }
         } else {
             ContentUnavailableView("这里没有照片", systemImage: "photo")
         }
@@ -143,6 +155,25 @@ struct LibraryScreen: View {
                 Text("已选 \(model.selectedIDs.count) 张").monospacedDigit()
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                // 多选后批量打（F-20）。
+                Menu {
+                    ForEach((1...5).reversed(), id: \.self) { n in
+                        Button(String(repeating: "★", count: n)) { model.setRating(n) }
+                    }
+                    Button("清除星级", systemImage: "star.slash") { model.setRating(0) }
+                } label: {
+                    Label("打星", systemImage: "star")
+                }
+                .disabled(model.selectedIDs.isEmpty)
+                Menu {
+                    Button("Pick", systemImage: "flag.fill") { model.setFlag(.pick) }
+                    Button("Reject", systemImage: "xmark") { model.setFlag(.reject) }
+                    Button("清除标记", systemImage: "flag.slash") { model.setFlag(.none) }
+                } label: {
+                    Label("标记", systemImage: "flag")
+                }
+                .disabled(model.selectedIDs.isEmpty)
+                UndoButtons(model: model)
                 Button(model.selectedIDs.count == model.photos.count ? "全不选" : "全选") {
                     model.selectedIDs = model.selectedIDs.count == model.photos.count ? [] : Set(model.photos.map(\.id))
                 }
@@ -151,6 +182,7 @@ struct LibraryScreen: View {
             }
         } else {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                UndoButtons(model: model)
                 Button {
                     model.readCardTapped()
                 } label: {

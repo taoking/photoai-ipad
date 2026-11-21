@@ -1,7 +1,8 @@
 import PhotoAICore
 import UIKit
 
-/// 网格里的一格：缩略图按原比例完整显示（不裁切，F-11），角上标“卡上已删”和选中。
+/// 网格里的一格：缩略图按原比例完整显示（不裁切，F-11），角上标星级、Pick / Reject（F-20）、“卡上已删”和选中。
+/// Reject 的照片调暗。
 final class PhotoCell: UICollectionViewCell {
     static let reuseID = "PhotoCell"
 
@@ -9,6 +10,7 @@ final class PhotoCell: UICollectionViewCell {
     private let placeholder = UIImageView()
     private let missingBadge = PaddedLabel()
     private let checkmark = UIImageView()
+    private let marksBadge = PaddedLabel()
     private var loadTask: Task<Void, Never>?
     private(set) var photoID: PhotoID?
 
@@ -38,6 +40,14 @@ final class PhotoCell: UICollectionViewCell {
         missingBadge.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(missingBadge)
 
+        marksBadge.font = .systemFont(ofSize: 11, weight: .semibold)
+        marksBadge.textColor = .white
+        marksBadge.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        marksBadge.layer.cornerRadius = 4
+        marksBadge.clipsToBounds = true
+        marksBadge.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(marksBadge)
+
         checkmark.image = UIImage(systemName: "checkmark.circle.fill")
         checkmark.tintColor = .systemBlue
         checkmark.backgroundColor = .white
@@ -46,6 +56,8 @@ final class PhotoCell: UICollectionViewCell {
         contentView.addSubview(checkmark)
 
         NSLayoutConstraint.activate([
+            marksBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
+            marksBadge.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
             missingBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
             missingBadge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
             checkmark.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5),
@@ -73,13 +85,20 @@ final class PhotoCell: UICollectionViewCell {
         didSet { updateSelection() }
     }
 
+    /// 解码哪一档（按格子大小，网格设）。
+    var thumbSize: ThumbnailCache.Size = .full
+    private var isRejected = false
+
     func configure(_ photo: PhotoSummary, cache: ThumbnailCache) {
         let sameItem = photoID == photo.id
         photoID = photo.id
         missingBadge.isHidden = photo.isOnCard
+        isRejected = photo.flag == .reject
+        marksBadge.attributedText = Self.marks(photo)
+        marksBadge.isHidden = marksBadge.attributedText == nil
         updateSelection()
 
-        if let image = cache.cached(photo.id) {
+        if let image = cache.cached(photo.id, size: thumbSize) {
             show(image)
             return
         }
@@ -98,8 +117,9 @@ final class PhotoCell: UICollectionViewCell {
             placeholder.image = UIImage(systemName: "photo")
             loadTask?.cancel()
             let id = photo.id
+            let size = thumbSize
             loadTask = Task { [weak self] in
-                let image = await cache.load(id)
+                let image = await cache.load(id, size: size)
                 guard !Task.isCancelled, let self, self.photoID == id, let image else { return }
                 self.show(image)
             }
@@ -113,7 +133,27 @@ final class PhotoCell: UICollectionViewCell {
 
     private func updateSelection() {
         checkmark.isHidden = !(isSelecting && isSelected)
-        imageView.alpha = isSelecting && isSelected ? 0.75 : 1
+        imageView.alpha = isSelecting && isSelected ? 0.75 : isRejected ? 0.4 : 1
+    }
+
+    /// “★3 ⚑”：星级、Pick（绿旗）、Reject（红叉）。都没有返回 nil。
+    static func marks(_ photo: PhotoSummary) -> NSAttributedString? {
+        let text = NSMutableAttributedString()
+        if photo.rating > 0 {
+            text.append(NSAttributedString(string: "★\(photo.rating)", attributes: [.foregroundColor: UIColor.systemYellow]))
+        }
+        let symbol: (String, UIColor)? = switch photo.flag {
+        case .pick: ("flag.fill", .systemGreen)
+        case .reject: ("xmark", .systemRed)
+        case .none: nil
+        }
+        if let (name, color) = symbol, let image = UIImage(systemName: name)?.withTintColor(color, renderingMode: .alwaysOriginal) {
+            if text.length > 0 { text.append(NSAttributedString(string: " ")) }
+            let attachment = NSTextAttachment(image: image)
+            attachment.bounds = CGRect(x: 0, y: -1, width: 11, height: 11)
+            text.append(NSAttributedString(attachment: attachment))
+        }
+        return text.length > 0 ? text : nil
     }
 }
 

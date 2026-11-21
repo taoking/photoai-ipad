@@ -48,28 +48,60 @@ final class AppModel {
 
     private(set) var cardState: CardState = .unknown
     var selection: SidebarItem = .all {
-        didSet { if selection != oldValue { exitSelection(); reloadPhotos() } }
+        didSet {
+            guard selection != oldValue else { return }
+            exitSelection()
+            sidebarSwitchStarted = DispatchTime.now().uptimeNanoseconds
+            reloadPhotos(keepResult: false)
+        }
     }
     var sort: PhotoSort {
         didSet {
             UserDefaults.standard.set(sort.rawValue, forKey: DefaultsKey.sort)
-            reloadPhotos()
+            reloadPhotos(keepResult: true)
         }
     }
-    /// 每个侧栏项的筛选条件（F-10；筛选条在 M2 做）。
+    /// 每个侧栏项的筛选条件（F-10）。只用星级和选择状态（F-22）。
     var filters: [SidebarItem: PhotoFilter] = [:]
 
-    /// 当前侧栏项里、筛选后的照片，按排序排好。
-    private(set) var photos: [PhotoSummary] = []
+    /// 当前侧栏项里的全部照片（筛选前），按排序排好。
+    var source: [PhotoSummary] = []
+    /// 筛选结果：网格和单张视图显示的就是它。打星后结果保持不变，点“刷新结果”才重新筛（F-22）。
+    var photos: [PhotoSummary] = []
+    /// 结果里已经不符合筛选条件的张数（“刷新结果”按钮上的数字）。
+    private(set) var staleCount = 0
+    @ObservationIgnored var sourceIndex: [PhotoID: Int] = [:]
+    @ObservationIgnored var resultIndex: [PhotoID: Int] = [:]
     private(set) var days: [DayCount] = []
     private(set) var undatedCount = 0
     private(set) var stats = CardStats()
 
     var isSelecting = false
     var selectedIDs: Set<PhotoID> = []
-    var openedPhoto: PhotoSummary?
     var isPickingCard = false
     var message: String?
+    var toast: Toast?
+
+    /// 单张视图正在看的照片（F-12）；nil 时在网格。
+    var currentPhotoID: PhotoID?
+    var isShowingSingle = false
+    /// 当前这张的详细信息（拍摄参数、文件），翻页后在后台读。
+    var currentDetail: PhotoDetail?
+    /// 回到网格时滚到这张。
+    var gridScrollTarget: PhotoID?
+
+    /// 自动前进（F-21）：单张视图里打星、标记后跳到下一张。
+    var autoAdvance: Bool {
+        didSet { UserDefaults.standard.set(autoAdvance, forKey: DefaultsKey.autoAdvance) }
+    }
+    /// 撤销记录（F-23）：本次运行内有效。系统的 `UndoManager` 只是入口（按钮、三指滑动、⌘Z），记录在这里。
+    var history = EditHistory()
+    /// 网格和单张视图做第一响应者时交出这个，三指滑动撤销、重做就作用在选片上。
+    @ObservationIgnored let undoManager: UndoManager = {
+        let manager = UndoManager()
+        manager.levelsOfUndo = 1_000
+        return manager
+    }()
 
     var previewConcurrency: Int {
         didSet { UserDefaults.standard.set(previewConcurrency, forKey: DefaultsKey.previewConcurrency) }
@@ -80,6 +112,10 @@ final class AppModel {
     /// 导入因为切后台、拔卡停下了，下次连上要续做。
     @ObservationIgnored private var needsResume = false
     @ObservationIgnored private var reloadGeneration = 0
+    /// 正在后台读的次数。读的过程中打了星，读到的可能是打星之前的值，要再读一次。
+    @ObservationIgnored private var reloadsInFlight = 0
+    @ObservationIgnored private var sidebarSwitchStarted: UInt64?
+    @ObservationIgnored var pageStarted: UInt64?
     @ObservationIgnored private var didLogFirstGrid = false
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
@@ -88,6 +124,7 @@ final class AppModel {
         isSynthetic = defaults.bool(forKey: DefaultsKey.useSyntheticLibrary)
         sort = PhotoSort(rawValue: defaults.string(forKey: DefaultsKey.sort) ?? "") ?? .captureDateDescending
         previewConcurrency = defaults.object(forKey: DefaultsKey.previewConcurrency) as? Int ?? 3
+        autoAdvance = defaults.bool(forKey: DefaultsKey.autoAdvance)
 
         let paths: LibraryPaths
         if isSynthetic {
@@ -263,12 +300,14 @@ final class AppModel {
     // MARK: - 数据
 
     /// 重读侧栏、概况和当前网格。在后台读，读完回主线程换上；晚到的旧结果丢掉。
+    /// 导入中的刷新保持结果不变：原来在结果里的照片留着，新照片按条件决定。
     func reloadAll() {
         reloadGeneration += 1
         let generation = reloadGeneration
         let reader = reader
         let scope = selection.scope
         let sort = sort
+        reloadsInFlight += 1
         Task {
             let result = await Task.detached { () -> Snapshot? in
                 try? Snapshot(
@@ -278,33 +317,81 @@ final class AppModel {
                     stats: reader.cardStats()
                 )
             }.value
+            reloadsInFlight -= 1
             guard let result, generation == reloadGeneration else { return }
             days = result.days
             undatedCount = result.undatedCount
             stats = result.stats
-            setPhotos(result.photos)
+            setSource(result.photos, keepResult: true)
             // 启动时库是空的（第一次读卡）：之后网格出照片是导入的结果，不算冷启动（PF-1）。
             if photos.isEmpty { didLogFirstGrid = true }
         }
     }
 
-    func reloadPhotos() {
+    /// `keepResult == false`：换了侧栏项，按条件重新筛。
+    func reloadPhotos(keepResult: Bool) {
         reloadGeneration += 1
         let generation = reloadGeneration
         let reader = reader
         let scope = selection.scope
         let sort = sort
+        reloadsInFlight += 1
         Task {
             let photos = await Task.detached { try? reader.photos(in: scope, sort: sort) }.value
+            reloadsInFlight -= 1
             guard let photos, generation == reloadGeneration else { return }
-            setPhotos(photos)
+            setSource(photos, keepResult: keepResult)
+            if let started = sidebarSwitchStarted {
+                sidebarSwitchStarted = nil
+                // 下一帧画出来才算切换完（PF-3）。
+                DispatchQueue.main.async { [count = self.photos.count] in
+                    appLog("切换侧栏项：\(msSince(started))，\(count) 张")
+                }
+            }
         }
     }
 
-    private func setPhotos(_ all: [PhotoSummary]) {
-        let filter = filters[selection] ?? PhotoFilter()
-        photos = filter.isEmpty ? all : all.filter(filter.matches)
-        selectedIDs.formIntersection(photos.map(\.id))
+    /// 写库之后调用：后台正在读的结果可能是写之前的，作废重读。
+    func reloadIfStale() {
+        if reloadsInFlight > 0 { reloadAll() }
+    }
+
+    /// 换上一组照片。`keepResult` 时不重新筛：原来在结果里的照片留着，
+    /// 新出现的照片按条件决定，原来被筛掉的仍然不显示（Mac 版 `setSource` 的做法）。
+    private func setSource(_ all: [PhotoSummary], keepResult: Bool) {
+        let previousResult = keepResult ? resultIndex : nil
+        let previousSource = sourceIndex
+        source = all
+        sourceIndex = Dictionary(uniqueKeysWithValues: all.enumerated().map { ($0.element.id, $0.offset) })
+        let filter = currentFilter
+        if filter.isEmpty {
+            setResult(all)
+        } else if let previousResult {
+            setResult(all.filter { previousResult[$0.id] != nil || (previousSource[$0.id] == nil && filter.matches($0)) })
+        } else {
+            setResult(all.filter(filter.matches))
+        }
+    }
+
+    func setResult(_ result: [PhotoSummary]) {
+        photos = result
+        resultIndex = Dictionary(uniqueKeysWithValues: result.enumerated().map { ($0.element.id, $0.offset) })
+        selectedIDs = selectedIDs.filter { resultIndex[$0] != nil }
+        updateStaleCount()
+        // 单张视图正看的这张不在结果里了（比如刷新结果）：留在原来的位置附近，结果空了回网格。
+        if let id = currentPhotoID, resultIndex[id] == nil {
+            if result.isEmpty {
+                closeSingle()
+            } else {
+                currentPhotoID = result[min(lastSingleIndex, result.count - 1)].id
+                loadCurrentDetail()
+            }
+        }
+    }
+
+    func updateStaleCount() {
+        let filter = currentFilter
+        staleCount = filter.isEmpty ? 0 : photos.reduce(0) { $0 + (filter.matches($1) ? 0 : 1) }
     }
 
     /// 网格第一次画出照片（PF-1：冷启动到网格可见 ≤ 2 秒）。
@@ -340,6 +427,8 @@ final class AppModel {
         }
     }
 
+    @ObservationIgnored var lastSingleIndex = 0
+
     private struct Snapshot: Sendable {
         var photos: [PhotoSummary]
         var days: [DayCount]
@@ -353,6 +442,18 @@ enum DefaultsKey {
     static let previewConcurrency = "previewConcurrency"
     static let useSyntheticLibrary = "useSyntheticLibrary"
     static let gridColumns = "gridColumns"
+    static let autoAdvance = "autoAdvance"
+}
+
+/// 一条短暂的提示，如“★3（12 张）”“撤销：Pick”。
+struct Toast: Equatable, Identifiable {
+    let id = UUID()
+    var text: String
+}
+
+/// 从 `start`（`DispatchTime` 纳秒）到现在，“12 ms”。
+func msSince(_ start: UInt64) -> String {
+    String(format: "%.0f ms", Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
 }
 
 /// `yyyy-MM-dd` → “11月21日 周六”，不是今年的带上年份。
