@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-PhotoAI 的 iPad 版：只给自己用的临时应急选片工具（iPad Pro 11 英寸 2018，iPadOS 26.6，只处理索尼 A7C II 的卡）。参考项目 `../photoai-mac-v2` 只读，不在那边改任何东西。
+PhotoAI 的 iPad 版：只给自己用的临时应急选片工具（iPad Pro 11 英寸 2018，iPadOS 26.7.3，只处理索尼 A7C II 的卡）。参考项目 `../photoai-mac-v2` 只读，不在那边改任何东西。
 
 ## 先读
 

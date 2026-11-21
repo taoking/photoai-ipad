@@ -28,7 +28,27 @@ final class SpikeModel {
         log("启动：第 \(launches.count) 次，构建 \(build)；之前的构建：\(Set(launches.map(\.build)).count) 种；签名到期 \(ProvisioningInfo.expiration() ?? "读不到")")
         log("首次启动记录：\(launches.first.map { "\($0.date) 构建 \($0.build)" } ?? "无")")
         log("书签文件\(CardBookmark.exists ? "在" : "不在")；\(MemoryProbe.describe())")
-        checkCard(reason: "启动")
+        retryAfterLaunch()
+    }
+
+    /// 冷启动时第一次解析书签会报 -2001（找不到文件提供者），过一会儿又好了。每秒试一次，最多 30 秒，看要等多久。
+    private func retryAfterLaunch() {
+        let log = log
+        Task.detached {
+            let start = DispatchTime.now().uptimeNanoseconds
+            for attempt in 1...30 {
+                let (resolution, time) = measure { CardBookmark.resolve() }
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+                if case .connected = resolution {
+                    log(String(format: "[启动重试] 第 %d 次（启动后 %.1f 秒）连上了，这次 %@", attempt, elapsed, ms(time)))
+                    return
+                }
+                let reason = if case let .failed(text) = resolution { String(text.prefix(80)) } else { CardBookmark.describe(resolution) }
+                log(String(format: "[启动重试] 第 %d 次（启动后 %.1f 秒）没连上：%@", attempt, elapsed, reason))
+                if case .none = resolution { return }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     func cardPicked(_ result: Result<URL, any Error>) {
