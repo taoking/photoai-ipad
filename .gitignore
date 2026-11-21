@@ -1,0 +1,10 @@
+.DS_Store
+xcuserdata/
+build/
+DerivedData/
+.build/
+.swiftpm/
+# 签名配置（Team ID、Bundle ID）不进仓库
+Config/Signing.xcconfig
+# 工程由 XcodeGen 从 project.yml 生成
+PhotoAI-iPad.xcodeproj/
