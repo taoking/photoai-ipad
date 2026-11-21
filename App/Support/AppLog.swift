@@ -1,46 +1,46 @@
 import Darwin
 import Foundation
 
-/// M0 技术验证的日志：屏幕上显示，同时追加到 Documents/技术验证日志.txt（“文件”App 里能看到，Mac 上用 devicectl 拷出来）。
-final class SpikeLog: @unchecked Sendable {
-    static let shared = SpikeLog()
+/// 运行日志：追加到 Documents/运行日志.txt（“文件”App 里能看到，Mac 上用 `Scripts/pull-log.sh` 拷出来）。
+/// 验收的耗时、内存、轮询状态变化都记在这里当证据（M0 的 `SpikeLog` 改的）。
+final class AppLog: @unchecked Sendable {
+    static let shared = AppLog()
 
     let fileURL: URL
     private let lock = NSLock()
     private let formatter: DateFormatter
-    private var onLine: (@Sendable (String) -> Void)?
 
     private init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        fileURL = documents.appendingPathComponent("技术验证日志.txt")
+        fileURL = documents.appendingPathComponent("运行日志.txt")
         formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-    }
-
-    func setHandler(_ handler: @escaping @Sendable (String) -> Void) {
-        lock.withLock { onLine = handler }
+        // 超过 2 MB 就换一个新文件，旧的留一份 `.1`。
+        let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > 2_000_000 {
+            let old = documents.appendingPathComponent("运行日志.1.txt")
+            try? FileManager.default.removeItem(at: old)
+            try? FileManager.default.moveItem(at: fileURL, to: old)
+        }
     }
 
     func callAsFunction(_ text: String) {
-        let handler: (@Sendable (String) -> Void)?
-        let line: String
         lock.lock()
-        line = "\(formatter.string(from: Date()))  \(text)"
-        handler = onLine
-        if let data = (line + "\n").data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: fileURL) {
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-                try? handle.close()
-            } else {
-                try? data.write(to: fileURL)
-            }
+        defer { lock.unlock() }
+        let line = "\(formatter.string(from: Date()))  \(text)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: fileURL) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: fileURL)
         }
-        lock.unlock()
-        handler?(line)
     }
 }
+
+let appLog = AppLog.shared
 
 /// 进程的内存占用（phys_footprint，和 Xcode 内存表、系统杀进程用的是同一个数）。
 enum MemoryProbe {
@@ -86,4 +86,17 @@ func summary(_ values: [Double]) -> String {
     guard !values.isEmpty else { return "无" }
     let average = values.reduce(0, +) / Double(values.count)
     return String(format: "%d 个，平均 %.1f ms，最小 %.1f，最大 %.1f", values.count, average, values.min()!, values.max()!)
+}
+
+/// 进程启动以来的毫秒数（PF-1：冷启动到网格可见）。
+enum ProcessClock {
+    static func millisecondsSinceLaunch() -> Double? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        let started = Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000
+        return (Date().timeIntervalSince1970 - started) * 1000
+    }
 }

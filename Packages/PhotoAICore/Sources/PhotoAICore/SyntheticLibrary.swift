@@ -1,0 +1,185 @@
+// 搬自 photoai-mac-v2 a291868 Sources/PhotoAICore/SyntheticLibrary.swift。改了：1 万张、一张卡、九成 RAW + JPEG、2% 卡上已删，
+// 相机型号 ILCE-7CM2；收藏夹按 1 万张缩小。
+import CoreGraphics
+import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+
+/// 合成的大库，给性能目标用（开发计划 §8）：默认 1 万张照片，九成是 RAW + JPEG，2% 卡上已删。
+/// 直接写数据库，不经过扫描；预览文件用少量真实 JPEG 硬链接出来，网格解码的开销和真实情况一样。
+public enum SyntheticLibrary {
+    public struct Options: Sendable {
+        public var photoCount = 10_000
+        public var rawFraction = 0.9
+        public var missingFraction = 0.02
+        public var withPreviewFiles = true
+        public init() {}
+    }
+
+    public static func build(at paths: LibraryPaths, options: Options = Options()) throws {
+        if FileManager.default.fileExists(atPath: paths.database.path) {
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: paths.database.path])
+        }
+        let library = try Library(paths: paths)
+        let db = library.db
+        var generator = SplitMix(seed: 42)
+        let now = Date()
+
+        let volumeID = Library.cardVolumeID
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+
+        try db.transaction {
+            let batch = Int(try db.insert("INSERT INTO import_batches (volume_id, started_at, photo_count) VALUES (?, ?, ?);",
+                                          [volumeID, now, options.photoCount]))
+            for index in 0..<options.photoCount {
+                // 约 2 个月，每天几百张，成团出现，和一次出门拍的接近。
+                let seconds = Double(index) * 500 + Double(generator.next() % 300)
+                let date = start.addingTimeInterval(seconds)
+                let captureDate = formatter.string(from: date)
+                let baseName = String(format: "DSC%05d", index % 100_000)
+                let landscape = generator.next() % 5 != 0
+                let photoID = Int(try db.insert(
+                    """
+                    INSERT INTO photos (identity_key, base_name, file_number, capture_date, camera_make, camera_model,
+                        width, height, thumb_state, preview_state, imported_at, import_batch_id)
+                    VALUES (?, ?, ?, ?, 'SONY', 'ILCE-7CM2', ?, ?, ?, ?, ?, ?);
+                    """,
+                    [
+                        PhotoIdentity.key(baseName: baseName, captureDate: captureDate, fileSize: 0), baseName, index % 100_000,
+                        captureDate, landscape ? 7008 : 4672, landscape ? 4672 : 7008,
+                        options.withPreviewFiles ? "ready" : "pending", options.withPreviewFiles ? "ready" : "pending",
+                        now, batch
+                    ]
+                ))
+                var kinds: [(String, String, Int)] = [("jpg", "jpeg", 12_000_000)]
+                if Double(generator.next() % 1000) / 1000 < options.rawFraction { kinds.append(("arw", "raw", 35_000_000)) }
+                let missing = Double(generator.next() % 1000) / 1000 < options.missingFraction
+                var locationCount = 0
+                for (ext, kind, size) in kinds {
+                    let fileID = Int(try db.insert(
+                        "INSERT INTO files (photo_id, extension, kind, file_size) VALUES (?, ?, ?, ?);",
+                        [photoID, ext, kind, size]
+                    ))
+                    if kind == "jpeg" {
+                        try db.run("UPDATE photos SET preview_file_id = ? WHERE id = ?;", [fileID, photoID])
+                    }
+                    let dir = "DCIM/\(100 + index / 9999)MSDCF"
+                    try db.run(
+                        """
+                        INSERT INTO locations (file_id, volume_id, relative_path, dir_path, file_size, file_mtime, status, last_seen_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [fileID, volumeID, "\(dir)/\(baseName).\(ext.uppercased())", dir, size, date.timeIntervalSince1970,
+                         missing ? "historical" : "present", now]
+                    )
+                    if !missing { locationCount += 1 }
+                }
+                try db.run("UPDATE photos SET present_location_count = ? WHERE id = ?;", [locationCount, photoID])
+                try addCullingMarks(db: db, photoID: photoID, generator: &generator)
+            }
+            // 两个收藏夹：小、大，PF-3（收藏夹）用。
+            for (name, size) in [("合成 · 精选 60", 60), ("合成 · 大 2000", 2_000)] {
+                let collection = try library.createCollection(name: name)
+                let stride = max(1, options.photoCount / size)
+                for index in Swift.stride(from: 1, through: options.photoCount, by: stride).prefix(size) {
+                    try db.run(
+                        "INSERT INTO collection_members (collection_id, photo_id, added_at) VALUES (?, ?, ?);",
+                        [collection, index, now]
+                    )
+                }
+            }
+        }
+
+        if options.withPreviewFiles {
+            try writePreviewFiles(store: PreviewStore(root: paths.previews), count: options.photoCount, reader: library.reader)
+        }
+    }
+
+    /// 星级、标记、标签按大致真实的比例：多数照片没打星，约四分之一有标签。PF-8 用。
+    private static func addCullingMarks(db: Database, photoID: Int, generator: inout SplitMix) throws {
+        let roll = generator.next() % 100
+        let rating = roll < 55 ? 0 : roll < 65 ? 1 : roll < 75 ? 2 : roll < 87 ? 3 : roll < 96 ? 4 : 5
+        let flagRoll = generator.next() % 100
+        let flag = flagRoll < 8 ? "pick" : flagRoll < 20 ? "reject" : "none"
+        if rating > 0 || flag != "none" {
+            try db.run("UPDATE photos SET rating = ?, flag = ? WHERE id = ?;", [rating, flag, photoID])
+        }
+        if generator.next() % 4 == 0 {
+            // 标签 id 1–4 是默认的“经典 / 人像 / 风景 / 人文”。
+            try db.run("INSERT INTO photo_labels (photo_id, label_id) VALUES (?, ?);", [photoID, Int(generator.next() % 4) + 1])
+            if generator.next() % 5 == 0 {
+                try db.run("INSERT OR IGNORE INTO photo_labels (photo_id, label_id) VALUES (?, ?);", [photoID, Int(generator.next() % 4) + 1])
+            }
+        }
+    }
+
+    /// 先画 24 张不同颜色的真实 JPEG，再硬链接到每张照片的预览路径。
+    private static func writePreviewFiles(store: PreviewStore, count: Int, reader: LibraryReader) throws {
+        let fileManager = FileManager.default
+        let seeds = store.root.appendingPathComponent(".synthetic", isDirectory: true)
+        try fileManager.createDirectory(at: seeds, withIntermediateDirectories: true)
+        var sources: [PreviewSize: [URL]] = [:]
+        for size in PreviewSize.allCases {
+            for index in 0..<24 {
+                let url = seeds.appendingPathComponent("\(size.rawValue)-\(index).jpg")
+                let landscape = index % 5 != 0
+                let long = size.rawValue
+                let short = long * 2 / 3
+                try writeJPEG(to: url, width: landscape ? long : short, height: landscape ? short : long, hue: Double(index) / 24)
+                sources[size, default: []].append(url)
+            }
+        }
+        let ids = try reader.db.all("SELECT id, height > width FROM photos ORDER BY id;") { ($0.int(0), $0.int(1) != 0) }
+        for (id, portrait) in ids {
+            for size in PreviewSize.allCases {
+                let destination = store.url(for: id, size: size)
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                // 编号是 5 的倍数的种子图是竖的，其余是横的。
+                let pool = sources[size]!.enumerated().filter { ($0.offset % 5 == 0) == portrait }.map(\.element)
+                try fileManager.linkItem(at: pool[id % pool.count], to: destination)
+            }
+        }
+    }
+
+    private static func writeJPEG(to url: URL, width: Int, height: Int, hue: Double) throws {
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
+        // 简单的渐变加几个色块，让 JPEG 的大小和解码开销接近真实照片。
+        for band in 0..<16 {
+            let t = Double(band) / 16
+            context.setFillColor(CGColor(red: 0.3 + 0.6 * hue, green: 0.2 + 0.6 * t, blue: 0.8 - 0.5 * hue * t, alpha: 1))
+            context.fill(CGRect(x: 0, y: height * band / 16, width: width, height: height / 16 + 1))
+        }
+        var random = SplitMix(seed: UInt64(width * 31 + Int(hue * 1000)))
+        for _ in 0..<400 {
+            context.setFillColor(CGColor(gray: Double(random.next() % 100) / 100, alpha: 0.35))
+            context.fillEllipse(in: CGRect(x: Int(random.next() % UInt64(width)), y: Int(random.next() % UInt64(height)), width: 24, height: 24))
+        }
+        let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+}
+
+/// 可复现的伪随机数，合成数据每次都一样。
+struct SplitMix {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
