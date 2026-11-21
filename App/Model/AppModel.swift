@@ -283,6 +283,8 @@ final class AppModel {
             undatedCount = result.undatedCount
             stats = result.stats
             setPhotos(result.photos)
+            // 启动时库是空的（第一次读卡）：之后网格出照片是导入的结果，不算冷启动（PF-1）。
+            if photos.isEmpty { didLogFirstGrid = true }
         }
     }
 
