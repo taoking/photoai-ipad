@@ -220,6 +220,17 @@ public struct LibraryReader: Sendable {
         ) { ($0.text(0) ?? "", $0.text(1) ?? "") }
     }
 
+    /// 卡上某种文件的前几个现存位置（相对卡根目录），诊断日志抽样用。
+    public func presentFilePaths(kind: FileKind, limit: Int) throws -> [String] {
+        try db.all(
+            """
+            SELECT l.relative_path FROM locations l JOIN files f ON f.id = l.file_id
+            WHERE f.kind = ? AND l.status = 'present' ORDER BY l.relative_path LIMIT ?;
+            """,
+            [kind.rawValue, limit]
+        ) { $0.text(0) ?? "" }
+    }
+
     // MARK: - 预览
 
     /// 需要生成预览、并且卡上有现存位置的照片，新拍的在前。
