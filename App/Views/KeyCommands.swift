@@ -3,6 +3,7 @@ import UIKit
 
 /// 外接键盘快捷键（F-26），网格和单张视图共用这一张表。沿用 Mac 版的单键；没有标签，不要 `6`–`9`；
 /// Smart Keyboard Folio 没有 `Esc`，另配 `⌘.`。按住 ⌘ 时系统会列出这些快捷键。
+/// 单张视图另有 `A`（对焦框）、`⇧Z`（放大到对焦点），同 Mac 版；`H`（直方图）是 iPad 版加的，Mac 版直方图一直在检查器里。
 enum KeyAction: Hashable {
     case rate(Int)
     case flag(Flag)
@@ -13,6 +14,10 @@ enum KeyAction: Hashable {
     case back
     /// 单张视图：100% ↔ 适合屏幕。
     case zoom
+    /// 单张视图：以对焦框为中心放大到 100%（F-18）。
+    case zoomToFocus
+    /// 单张视图：显示 / 隐藏对焦框、直方图（F-17、F-18）。
+    case toggleFocusPoint, toggleHistogram
     case addToLastCollection
     case undo, redo
 
@@ -24,7 +29,7 @@ enum KeyAction: Hashable {
         actions += (1...5).map { .rate($0) } + [.rate(0), .flag(.pick), .flag(.reject), .flag(.none), .addToLastCollection]
         switch place {
         case .grid: actions += [.toggleSingle]
-        case .single: actions += [.previous, .next, .zoom, .toggleSingle, .back]
+        case .single: actions += [.previous, .next, .zoomToFocus, .zoom, .toggleFocusPoint, .toggleHistogram, .toggleSingle, .back]
         }
         return actions
     }
@@ -40,6 +45,9 @@ enum KeyAction: Hashable {
         case .toggleSingle: [(" ", [])]
         case .back: [(UIKeyCommand.inputEscape, []), (".", .command)]
         case .zoom: [("z", [])]
+        case .zoomToFocus: [("z", .shift)]
+        case .toggleFocusPoint: [("a", [])]
+        case .toggleHistogram: [("h", [])]
         case .addToLastCollection: [("b", [])]
         case .undo: [("z", .command)]
         case .redo: [("z", [.command, .shift])]
@@ -56,6 +64,9 @@ enum KeyAction: Hashable {
         case .toggleSingle: "网格 ↔ 单张"
         case .back: "回到网格"
         case .zoom: "100% ↔ 适合屏幕"
+        case .zoomToFocus: "放大到对焦点（100%）"
+        case .toggleFocusPoint: "显示 / 隐藏对焦框"
+        case .toggleHistogram: "显示 / 隐藏直方图"
         case .addToLastCollection: "加入上一次的收藏夹"
         case .undo: "撤销"
         case .redo: "重做"
@@ -95,6 +106,9 @@ enum KeyAction: Hashable {
         case .toggleSingle: "toggleSingle"
         case .back: "back"
         case .zoom: "zoom"
+        case .zoomToFocus: "zoomToFocus"
+        case .toggleFocusPoint: "toggleFocusPoint"
+        case .toggleHistogram: "toggleHistogram"
         case .addToLastCollection: "addToLastCollection"
         case .undo: "undo"
         case .redo: "redo"

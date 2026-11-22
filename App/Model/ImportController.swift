@@ -97,6 +97,8 @@ final class ImportController {
                         scanDone: { scanDone.value },
                         progress: { made, failed in Task { @MainActor in self.previewsProgressed(made: made, failed: failed) } }
                     )
+                    // 预览做完（扫描也结束了）再读对焦框（F-18）：每张只读文件头，2,000 多张几秒。
+                    Self.readFocus(library: library, root: root, flag: flag)
                 }
             }
             heartbeat.cancel()
@@ -152,6 +154,17 @@ final class ImportController {
             }
         }
         progress(made, failed)
+    }
+
+    nonisolated private static func readFocus(library: Library, root: URL, flag: StopFlag) {
+        guard !flag.isStopped, let pending = try? library.reader.pendingFocusCount(), pending > 0 else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            let done = try FocusRunner(library: library).run(cardURL: root, shouldStop: { flag.isStopped })
+            appLog("读对焦框：\(done) / \(pending) 张，\(msSince(started))")
+        } catch {
+            appLog("读对焦框写库出错：\(error)")
+        }
     }
 
     // MARK: - 进度

@@ -1,4 +1,4 @@
-// 搬自 photoai-mac-v2 a291868 Tests/PhotoAICoreTests/FocusPointTests.swift，去掉了依赖库的 runnerStoresFocusForOnlinePhotos。
+// 搬自 photoai-mac-v2 a291868 Tests/PhotoAICoreTests/FocusPointTests.swift；`runnerStoresFocusForCardPhotos` 改成只有一张卡的写法。
 import Foundation
 import Testing
 @testable import PhotoAICore
@@ -100,4 +100,32 @@ import Testing
         #expect(FocusPointReader.read(at: URL(fileURLWithPath: "/nonexistent/DSC00001.JPG")) == nil, "读不了的文件下次再试")
     }
 
+    @Test func runnerStoresFocusForCardPhotos() async throws {
+        let temp = try TemporaryLibrary()
+        let card = try FakeCard()
+        for index in 1...2 {
+            try SampleImages.writeJPEG(
+                to: card.url(String(format: "DCIM/100MSDCF/DSC%05d.JPG", index)), width: 600, height: 400,
+                captureDate: String(format: "2026:08:12 10:00:%02d", index)
+            )
+        }
+        try await CardScanner(library: temp.library).scan(cardURL: card.root)
+        let photos = try temp.reader.photos(in: .all).sorted { $0.baseName < $1.baseName }
+        #expect(photos.count == 2)
+        #expect(try temp.reader.pendingFocusCount() == 2)
+        // 第一张换成带索尼对焦框的文件（只换内容，库里的记录不变）；第二张是没有 MakerNote 的普通 JPEG。
+        try Data(Self.jpeg(wrapping: Self.sonyTIFF(withHeader: true))).write(to: card.url("DCIM/100MSDCF/DSC00001.JPG"))
+
+        let gone = card.root.appendingPathComponent("拔掉的卡")
+        #expect(try FocusRunner(library: temp.library).run(cardURL: gone) == 0, "卡拔了读不了，下次再读")
+        #expect(try temp.reader.pendingFocusCount() == 2)
+        #expect(try FocusRunner(library: temp.library).run(cardURL: card.root) == 2)
+        let area = try #require(try temp.reader.focusArea(of: photos[0].id))
+        #expect(abs(area.x - 0.475) < 1e-9 && abs(area.y - 0.225) < 1e-9)
+        #expect(try temp.reader.detail(of: photos[0].id)?.focus == area)
+        #expect(try temp.reader.focusArea(of: photos[1].id) == nil, "相机没记就没有框")
+        #expect(try temp.reader.detail(of: photos[1].id)?.focusState == "none")
+        #expect(try temp.reader.pendingFocusCount() == 0)
+        #expect(try FocusRunner(library: temp.library).run(cardURL: card.root) == 0, "读过的不再读")
+    }
 }

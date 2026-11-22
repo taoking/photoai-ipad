@@ -1,5 +1,5 @@
 // 搬自 photoai-mac-v2 a291868 Sources/PhotoAICore/SyntheticLibrary.swift。改了：1 万张、一张卡、九成 RAW + JPEG、2% 卡上已删，
-// 相机型号 ILCE-7CM2；收藏夹按 1 万张缩小。
+// 相机型号 ILCE-7CM2；收藏夹按 1 万张缩小；加了对焦框（F-18）。
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -75,6 +75,7 @@ public enum SyntheticLibrary {
                     if !missing { locationCount += 1 }
                 }
                 try db.run("UPDATE photos SET present_location_count = ? WHERE id = ?;", [locationCount, photoID])
+                try addFocus(db: db, photoID: photoID, index: index, landscape: landscape)
                 try addCullingMarks(db: db, photoID: photoID, generator: &generator)
             }
             // 两个收藏夹：小、大，PF-3（收藏夹）用。
@@ -93,6 +94,20 @@ public enum SyntheticLibrary {
         if options.withPreviewFiles {
             try writePreviewFiles(store: PreviewStore(root: paths.previews), count: options.photoCount, reader: library.reader)
         }
+    }
+
+    /// 对焦框（F-18）：每三张一张相机没记，其余一个小框，位置按编号挪。不用随机数，别的数据和以前一样。
+    private static func addFocus(db: Database, photoID: Int, index: Int, landscape: Bool) throws {
+        guard index % 3 != 2 else {
+            try db.run("UPDATE photos SET focus_state = 'none' WHERE id = ?;", [photoID])
+            return
+        }
+        let width = landscape ? 0.04 : 0.06
+        let height = landscape ? 0.06 : 0.04
+        try db.run(
+            "UPDATE photos SET focus_state = 'found', focus_x = ?, focus_y = ?, focus_w = ?, focus_h = ? WHERE id = ?;",
+            [0.15 + 0.6 * Double(index % 7) / 6, 0.2 + 0.5 * Double(index % 5) / 4, width, height, photoID]
+        )
     }
 
     /// 星级、标记、标签按大致真实的比例：多数照片没打星，约四分之一有标签。PF-8 用。
