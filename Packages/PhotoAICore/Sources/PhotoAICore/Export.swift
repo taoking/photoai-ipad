@@ -298,9 +298,11 @@ struct PhotoExport {
                             report.alreadyExportedFiles += 1
                         }
                         done = true
-                    } catch CopyFailure.source(let reason) {
-                        // 读到一半出错多半是卡拔了：卡真的不在了就整批停下。
-                        if !context.exporter.finder.isCardReachable() { throw ExportStop.stopped("卡没连接了") }
+                    } catch CopyFailure.source(let reason, let code) {
+                        // 读到一半出错多半是卡拔了：I/O 错误或者卡真的不在了就整批停下。
+                        if OriginalFinder.meansCardGone(code) || !context.exporter.finder.isCardReachable() {
+                            throw ExportStop.stopped("卡没连接了")
+                        }
                         problems.append(reason)
                     }
                 }
@@ -317,7 +319,8 @@ struct PhotoExport {
     }
 
     enum CopyOutcome { case copied, alreadyExported }
-    enum CopyFailure: Error { case source(String) }
+    /// 读卡出错；`code` 是 errno（不是系统调用出的错时为 0）。
+    enum CopyFailure: Error { case source(String, code: Int32) }
 
     /// 复制一个文件。先写临时文件，写完、落盘后再改成正式的名字；改名不覆盖已有文件。
     private func copy(fd: Int32, size: Int, modified: timespec, name: String) throws -> CopyOutcome {
@@ -345,14 +348,14 @@ struct PhotoExport {
             Darwin.close(out)
             if !finished { unlink(temp.path) }
         }
-        guard lseek(fd, 0, SEEK_SET) == 0 else { throw CopyFailure.source("读不了：\(String(cString: strerror(errno)))") }
+        guard lseek(fd, 0, SEEK_SET) == 0 else { throw Self.sourceFailure("读不了") }
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
         defer { buffer.deallocate() }
         var total = 0
         while true {
             if isCancelled { throw ExportStop.cancelled }
             let count = read(fd, buffer, chunkSize)
-            if count < 0 { throw CopyFailure.source("读到一半出错：\(String(cString: strerror(errno)))") }
+            if count < 0 { throw Self.sourceFailure("读到一半出错") }
             if count == 0 { break }
             var offset = 0
             while offset < count {
@@ -362,11 +365,17 @@ struct PhotoExport {
             }
             total += count
         }
-        guard total == size else { throw CopyFailure.source("读到的字节数（\(total)）和文件大小（\(size)）不一致") }
+        guard total == size else { throw CopyFailure.source("读到的字节数（\(total)）和文件大小（\(size)）不一致", code: 0) }
         var times = [timespec(tv_sec: 0, tv_nsec: Int(UTIME_OMIT)), modified]
         futimens(out, &times)
         guard fsync(out) == 0 else { throw ExportStop.stopped(Self.destinationMessage(errno, temp)) }
         finished = true
+    }
+
+    /// 刚失败的系统调用的 errno 包成读卡错误。
+    private static func sourceFailure(_ what: String) -> CopyFailure {
+        let code = errno
+        return .source("\(what)：\(String(cString: strerror(code)))", code: code)
     }
 
     /// 改名但不覆盖：`renamex_np(RENAME_EXCL)`；文件系统不支持时用硬链接，再不行先查再改。返回 0 或 errno。

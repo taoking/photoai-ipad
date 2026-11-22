@@ -100,8 +100,13 @@ public struct OriginalFinder: Sendable {
         case missing
         /// 卡没连着（或者刚被拔掉）。
         case offline
-        /// 文件在，但读不了（权限、读写错误、大小和上次扫描时不同）。不改历史位置。
+        /// 文件在，但读不了（权限、大小和上次扫描时不同）。不改历史位置。
         case unreadable(String)
+    }
+
+    /// 读卡时的这些错误就当卡拔了：拔卡后的一小会儿 `DCIM` 还列得出来，打开、读文件却报 I/O 错误（M3 真机验收 #25）。
+    public static func meansCardGone(_ code: Int32) -> Bool {
+        code == EIO || code == ENXIO || code == ENODEV
     }
 
     public func url(_ source: OriginalSource) -> URL {
@@ -116,13 +121,15 @@ public struct OriginalFinder: Sendable {
             if code == ENOENT || code == ENOTDIR {
                 return isCardReachable() ? .missing : .offline
             }
-            return isCardReachable() ? .unreadable(String(cString: strerror(code))) : .offline
+            guard !Self.meansCardGone(code), isCardReachable() else { return .offline }
+            return .unreadable(String(cString: strerror(code)))
         }
         var info = stat()
         guard fstat(fd, &info) == 0 else {
-            let message = String(cString: strerror(errno))
+            let code = errno
             Darwin.close(fd)
-            return .unreadable(message)
+            if Self.meansCardGone(code) { return .offline }
+            return .unreadable(String(cString: strerror(code)))
         }
         guard Int(info.st_size) == source.fileSize else {
             Darwin.close(fd)

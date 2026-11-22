@@ -74,4 +74,10 @@ import Testing
         #expect(lookup.problems.count == 1)
         #expect(lookup.missingLocationIDs.isEmpty)
     }
+
+    /// 拔卡后的一小会儿目录还列得出来，读文件报 I/O 错误：当卡拔了，不当成这个文件读不了（M3 真机验收 #25）。
+    @Test func ioErrorsMeanCardGone() {
+        #expect(OriginalFinder.meansCardGone(EIO) && OriginalFinder.meansCardGone(ENXIO))
+        #expect(!OriginalFinder.meansCardGone(EACCES) && !OriginalFinder.meansCardGone(ENOENT) && !OriginalFinder.meansCardGone(0))
+    }
 }
