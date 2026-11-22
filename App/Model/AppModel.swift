@@ -10,20 +10,15 @@ enum SidebarItem: Hashable, Sendable {
     /// `yyyy-MM-dd`
     case day(String)
     case undated
+    /// 收藏夹（F-25）。
+    case collection(CollectionID)
 
     var scope: PhotoScope {
         switch self {
         case .all: .all
         case .day(let day): .datePrefix(day)
         case .undated: .undated
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .all: "全部照片"
-        case .day(let day): DayFormat.title(day)
-        case .undated: "日期未知"
+        case .collection(let id): .collection(id)
         }
     }
 }
@@ -76,6 +71,14 @@ final class AppModel {
     private(set) var days: [DayCount] = []
     private(set) var undatedCount = 0
     private(set) var stats = CardStats()
+    /// 收藏夹（F-25），按名字排。
+    var collections: [CollectionRecord] = []
+    /// 打开着的“新建收藏夹”“改名”输入框。
+    var collectionPrompt: CollectionPrompt?
+    /// 等确认删除的收藏夹。
+    var collectionToDelete: CollectionRecord?
+    /// 本次运行里最后用过的收藏夹（“加入上一次的收藏夹”）。
+    var lastCollectionID: CollectionID?
 
     var isSelecting = false
     var selectedIDs: Set<PhotoID> = []
@@ -322,7 +325,8 @@ final class AppModel {
                     photos: reader.photos(in: scope, sort: sort),
                     days: reader.dayCounts(),
                     undatedCount: reader.undatedCount(),
-                    stats: reader.cardStats()
+                    stats: reader.cardStats(),
+                    collections: reader.collections()
                 )
             }.value
             reloadsInFlight -= 1
@@ -330,6 +334,7 @@ final class AppModel {
             days = result.days
             undatedCount = result.undatedCount
             stats = result.stats
+            collections = result.collections
             setSource(result.photos, keepResult: true)
             // 启动时库是空的（第一次读卡）：之后网格出照片是导入的结果，不算冷启动（PF-1）。
             if photos.isEmpty { didLogFirstGrid = true }
@@ -475,6 +480,7 @@ final class AppModel {
         var days: [DayCount]
         var undatedCount: Int
         var stats: CardStats
+        var collections: [CollectionRecord]
     }
 }
 
@@ -485,6 +491,7 @@ enum DefaultsKey {
     static let gridColumns = "gridColumns"
     static let autoAdvance = "autoAdvance"
     static let exportFiles = "exportFiles"
+    static let exportTarget = "exportTarget"
 }
 
 /// 一条短暂的提示，如“★3（12 张）”“撤销：Pick”。

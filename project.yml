@@ -35,6 +35,8 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         # 在“文件”App 里能看到 Documents（技术验证日志放这里）。
         INFOPLIST_KEY_UIFileSharingEnabled: YES
+        # 存到“照片”（F-33）只申请添加照片。
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 把选中的照片存进“照片”App（只添加，不读你的图库）。
         INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         ENABLE_USER_SCRIPT_SANDBOXING: YES
   # 网格交互的界面测试，只在模拟器上跑（用合成库，不碰卡）。

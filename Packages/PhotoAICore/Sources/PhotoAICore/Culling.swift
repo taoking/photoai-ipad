@@ -124,6 +124,11 @@ public struct EditHistory: Sendable {
         redoStack = redoStack.filter(unrelated)
     }
 
+    /// 只清重做记录（删收藏夹后撤销记录重新登记时用：系统的 `UndoManager` 没法凭空登记重做）。
+    public mutating func removeRedo() {
+        redoStack.removeAll()
+    }
+
     public mutating func removeAll() {
         undoStack.removeAll()
         redoStack.removeAll()

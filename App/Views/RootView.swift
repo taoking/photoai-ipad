@@ -29,6 +29,7 @@ struct RootView: View {
         .sheet(isPresented: $model.isShowingSettings) {
             SettingsView(model: model)
         }
+        .modifier(CollectionPrompts(model: model, isActive: !model.isShowingSingle))
         .task { model.launched() }
         .onChange(of: scenePhase, initial: true) { _, phase in model.scenePhaseChanged(to: phase) }
     }
@@ -51,6 +52,7 @@ struct SidebarView: View {
                 }
                 .tag(SidebarItem.all)
             }
+            SidebarCollections(model: model)
             ForEach(months, id: \.month) { group in
                 Section(DayFormat.month(group.month)) {
                     ForEach(group.days, id: \.day) { day in
@@ -111,12 +113,14 @@ struct LibraryScreen: View {
             .safeAreaInset(edge: .bottom) {
                 ImportStatusBar(model: model, importer: model.importer)
             }
-            .navigationTitle(model.selection.title)
+            .navigationTitle(model.title(of: model.selection))
             .navigationSubtitle(subtitle)
             .toolbar { toolbar }
     }
 
     private var subtitle: String {
+        // 选择模式下工具栏按钮多，“已选 N 张”放在这里。
+        if model.isSelecting { return "已选 \(model.selectedIDs.count) 张" }
         let count = model.currentFilter.isEmpty ? "\(model.photos.count) 张" : "筛选出 \(model.photos.count) / \(model.source.count) 张"
         var parts = [cardStatus, count]
         if model.stats.missingFromCardCount > 0 { parts.append("卡上已删 \(model.stats.missingFromCardCount) 张") }
@@ -157,8 +161,13 @@ struct LibraryScreen: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if model.isSelecting {
-            ToolbarItem(placement: .topBarLeading) {
-                Text("已选 \(model.selectedIDs.count) 张").monospacedDigit()
+            // “完成”“全选”放左边：右边按钮多，侧栏开着时会挤进“更多”。
+            ToolbarItemGroup(placement: .topBarLeading) {
+                Button("完成") { model.exitSelection() }
+                    .fontWeight(.semibold)
+                Button(model.selectedIDs.count == model.photos.count ? "全不选" : "全选") {
+                    model.selectedIDs = model.selectedIDs.count == model.photos.count ? [] : Set(model.photos.map(\.id))
+                }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // 多选后批量打（F-20）。
@@ -179,6 +188,13 @@ struct LibraryScreen: View {
                     Label("标记", systemImage: "flag")
                 }
                 .disabled(model.selectedIDs.isEmpty)
+                Menu {
+                    CollectionMenuItems(model: model)
+                } label: {
+                    Label("收藏夹", systemImage: "rectangle.stack.badge.plus")
+                }
+                .disabled(model.selectedIDs.isEmpty)
+                .accessibilityIdentifier("收藏夹菜单")
                 Button {
                     model.showExport()
                 } label: {
@@ -186,11 +202,6 @@ struct LibraryScreen: View {
                 }
                 .disabled(model.selectedIDs.isEmpty)
                 UndoButtons(model: model)
-                Button(model.selectedIDs.count == model.photos.count ? "全不选" : "全选") {
-                    model.selectedIDs = model.selectedIDs.count == model.photos.count ? [] : Set(model.photos.map(\.id))
-                }
-                Button("完成") { model.exitSelection() }
-                    .fontWeight(.semibold)
             }
         } else {
             ToolbarItemGroup(placement: .topBarTrailing) {

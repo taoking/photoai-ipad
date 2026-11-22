@@ -85,6 +85,12 @@ public struct ExportReport: Sendable, Equatable {
         /// 文件名，例如 `DSC01926.ARW`。
         public var name: String
         public var reason: String
+
+        public init(photoID: PhotoID, name: String, reason: String) {
+            self.photoID = photoID
+            self.name = name
+            self.reason = reason
+        }
     }
 
     public var destination: URL
@@ -138,6 +144,8 @@ public struct Exporter: Sendable {
     public var finder: OriginalFinder
     /// 每次读写的块大小。
     var chunkSize = 4 << 20
+    /// 导出成功就记“导出过”。存到“照片”时先复制到临时文件夹，存进“照片”之后才记，这里关掉。
+    public var marksExported = true
 
     public init(library: Library, finder: OriginalFinder) {
         self.library = library
@@ -187,7 +195,7 @@ public struct Exporter: Sendable {
                 if exported > 0 {
                     report.exportedPhotoIDs.append(photoID)
                     // 一张一张记：中途停下，已经导出的照片也算“导出过”。
-                    try library.markExported([photoID])
+                    if marksExported { try library.markExported([photoID]) }
                 }
             } catch ExportStop.cancelled {
                 report.cancelled = true

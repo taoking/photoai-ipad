@@ -80,7 +80,8 @@ extension AppModel {
         show(count > 1 ? "\(title)（\(count) 张）" : title)
         // 下一帧画出来才算界面有反应（PF-6）。
         DispatchQueue.main.async { appLog("打星 / 标记「\(title)」\(count) 张：\(msSince(started))") }
-        if autoAdvance, isShowingSingle, count == 1 {
+        // 自动前进只对星级、标记（加入收藏夹不算）。
+        if autoAdvance, isShowingSingle, count == 1, edit.isMarkEdit {
             move(1)
         }
     }
@@ -98,8 +99,11 @@ extension AppModel {
             for (id, rating) in after { update(id) { $0.rating = rating } }
         case .flag(_, let after):
             for (id, flag) in after { update(id) { $0.flag = flag } }
-        case .labels, .membership:
-            // iPad 版没有标签（用户：“颜色标签不需要”），收藏夹在 M4。
+        case .labels:
+            // iPad 版没有标签（用户：“颜色标签不需要”）。
+            return
+        case .membership(let collection, _, _):
+            membershipChanged(collection)
             return
         }
         self.source = source
@@ -110,7 +114,7 @@ extension AppModel {
     // MARK: 撤销（F-23）
 
     /// 记录在 `history` 里，系统的 `UndoManager` 只登记一个“撤销上一步”：按钮、三指滑动、⌘Z 都走它。
-    private func registerUndo(title: String) {
+    func registerUndo(title: String) {
         undoManager.registerUndo(withTarget: self) { model in
             MainActor.assumeIsolated { model.undoLast() }
         }
@@ -118,7 +122,12 @@ extension AppModel {
     }
 
     func undo() {
-        if undoManager.canUndo { undoManager.undo() } else { show("没有可撤销的操作") }
+        if undoManager.canUndo {
+            undoManager.undo()
+        } else {
+            appLog("撤销：系统的撤销记录是空的（选片记录 \(history.undoStack.count) 条）")
+            show("没有可撤销的操作")
+        }
     }
 
     func redo() {
@@ -126,6 +135,8 @@ extension AppModel {
     }
 
     private func undoLast() {
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { DispatchQueue.main.async { appLog("撤销：\(msSince(started))") } }
         do {
             guard let entry = try history.undo({ try library.apply($0) }) else { return show("没有可撤销的操作") }
             applyToMemory(entry.edit.inverse)
@@ -180,6 +191,36 @@ extension AppModel {
         guard on != autoAdvance else { return }
         autoAdvance = on
         show(on ? "自动前进：开（打完跳到下一张）" : "自动前进：关")
+    }
+}
+
+// MARK: - 快捷键（F-26）
+
+extension AppModel {
+    /// 网格和单张视图收到的快捷键。“网格 ↔ 单张”在网格那边由网格决定打开哪张，100% 放大由翻页视图自己做。
+    func perform(_ action: KeyAction) {
+        switch action {
+        case .rate(let n):
+            guard !targetIDs.isEmpty else { return show("先选中照片") }
+            setRating(n)
+        case .flag(let flag):
+            guard !targetIDs.isEmpty else { return show("先选中照片") }
+            setFlag(flag)
+        case .addToLastCollection:
+            addToLastCollection()
+        case .previous:
+            if isShowingSingle { move(-1) }
+        case .next:
+            if isShowingSingle { move(1) }
+        case .toggleSingle, .back:
+            if isShowingSingle { closeSingle() }
+        case .zoom:
+            break
+        case .undo:
+            undo()
+        case .redo:
+            redo()
+        }
     }
 }
 

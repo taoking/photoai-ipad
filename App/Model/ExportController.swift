@@ -4,7 +4,7 @@ import PhotoAICore
 import Synchronization
 import UIKit
 
-/// 导出到文件夹（F-30 – F-32）：在后台一张一张流式复制，进度和结果给导出面板显示，耗时、速度、内存记进日志（PF-9）。
+/// 导出到文件夹（F-30 – F-32）或存到“照片”（F-33）：在后台一张一张流式复制，进度和结果给导出面板显示，耗时、速度、内存记进日志（PF-9）。
 ///
 /// 导出时屏幕常亮；切到后台系统给的时间用完就停下（停在一个文件之前），回来再导一次就是续传。
 @MainActor @Observable
@@ -15,6 +15,19 @@ final class ExportController {
         case finished(ExportReport)
     }
 
+    enum Target: String, CaseIterable {
+        case folder
+        /// “照片”App（F-33）。
+        case photos
+
+        var title: String {
+            switch self {
+            case .folder: "文件夹"
+            case .photos: "“照片”App"
+            }
+        }
+    }
+
     private(set) var phase: Phase = .idle
     private(set) var progress: ExportProgress?
     private(set) var startedAt: Date?
@@ -23,6 +36,11 @@ final class ExportController {
     var files: ExportRequest.Files {
         didSet { UserDefaults.standard.set(files.rawValue, forKey: DefaultsKey.exportFiles) }
     }
+    var target: Target {
+        didSet { UserDefaults.standard.set(target.rawValue, forKey: DefaultsKey.exportTarget) }
+    }
+    /// 正在跑（或刚跑完）的这次导出到哪儿。
+    private(set) var runningTarget: Target = .folder
 
     var isRunning: Bool { phase == .running }
     /// 导出完成后调（刷新网格：导出时发现卡上没了的照片变成“卡上已删”）。
@@ -35,6 +53,7 @@ final class ExportController {
     init(library: Library) {
         self.library = library
         files = ExportRequest.Files(rawValue: UserDefaults.standard.string(forKey: DefaultsKey.exportFiles) ?? "") ?? .both
+        target = Target(rawValue: UserDefaults.standard.string(forKey: DefaultsKey.exportTarget) ?? "") ?? .folder
         refreshFolderName()
     }
 
@@ -80,7 +99,10 @@ final class ExportController {
     /// 开始导出。`cardBookmark` 是卡的书签（导出要求卡连着）。返回错误时没开始。
     func start(_ photoIDs: [PhotoID], cardBookmark: Data) -> String? {
         guard !isRunning else { return "正在导出" }
-        guard let folderBookmark = try? library.reader.exportFolderBookmark() else { return "先选一个导出文件夹" }
+        let target = target
+        let folderBookmark = try? library.reader.exportFolderBookmark()
+        if target == .folder, folderBookmark == nil { return "先选一个导出文件夹" }
+        runningTarget = target
         let flag = ExportCancelFlag()
         cancelFlag = flag
         phase = .running
@@ -94,12 +116,20 @@ final class ExportController {
         }
         let files = files
         let library = library
-        appLog("导出开始：\(photoIDs.count) 张，文件 \(files.title)，到 \(folderName ?? "?")；\(MemoryProbe.describe())")
+        let destination = target == .photos ? "“照片”" : folderName ?? "?"
+        appLog("导出开始：\(photoIDs.count) 张，文件 \(files.title)，到 \(destination)；\(MemoryProbe.describe())")
 
         Task { [weak self] in
             let report = await Task.detached(priority: .userInitiated) { [weak self] () -> Result<ExportReport, ExportStartError> in
                 guard case .success(let (card, _)) = CardConnection.open(cardBookmark) else { return .failure(.message("卡没连接")) }
                 defer { card.stop() }
+                if target == .photos {
+                    return .success(await PhotosSaver.run(
+                        photoIDs, files: files, library: library, cardRoot: card.root, isCancelled: { flag.isCancelled },
+                        progress: { progress in Task { @MainActor in self?.update(progress) } }
+                    ))
+                }
+                guard let folderBookmark else { return .failure(.message("先选一个导出文件夹")) }
                 var stale = false
                 guard let folder = try? URL(resolvingBookmarkData: folderBookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
                     return .failure(.message("导出文件夹找不到了，请重新选一个"))

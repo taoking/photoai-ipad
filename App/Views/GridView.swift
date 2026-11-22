@@ -12,8 +12,7 @@ struct GridView: UIViewControllerRepresentable {
         controller.onSelectionChanged = { model.selectedIDs = $0 }
         controller.onBeginSelecting = { model.isSelecting = true }
         controller.onShowedPhotos = { model.gridDidShowPhotos() }
-        controller.undo = { model.undo() }
-        controller.redo = { model.redo() }
+        controller.onKey = { model.perform($0) }
         controller.modelUndoManager = model.undoManager
         return controller
     }
@@ -22,6 +21,7 @@ struct GridView: UIViewControllerRepresentable {
         controller.update(
             photos: model.photos, isSelecting: model.isSelecting, selected: model.selectedIDs, scrollTarget: model.gridScrollTarget
         )
+        controller.setCovered(model.isShowingSingle)
         if model.gridScrollTarget != nil {
             DispatchQueue.main.async { model.gridScrollTarget = nil }
         }

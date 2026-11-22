@@ -7,7 +7,7 @@ public struct ClearCheck: Sendable, Equatable {
     public var photoCount = 0
     /// 预览还没做好（待做或做失败）的照片。
     public var previewNotReadyCount = 0
-    /// 选过但没导出：打过星或 Pick，而且一次都没导出过（P1 起加上收藏夹）。按拍摄时间排。
+    /// 选过但没导出：打过星、Pick 或者在收藏夹里，而且一次都没导出过。按拍摄时间排。
     public var selectedNotExportedIDs: [PhotoID] = []
     /// 卡上已删的照片（清卡时一起删）。
     public var missingFromCardCount = 0
@@ -40,7 +40,7 @@ extension LibraryReader {
         check.selectedNotExportedIDs = try db.all(
             """
             SELECT id FROM photos
-            WHERE (rating > 0 OR flag = 'pick') AND last_exported_at IS NULL
+            WHERE (rating > 0 OR flag = 'pick' OR id IN (SELECT photo_id FROM collection_members)) AND last_exported_at IS NULL
             ORDER BY capture_date, capture_subsec, base_name, id;
             """
         ) { $0.int(0) }

@@ -82,15 +82,26 @@ struct ExportPanel: View {
                 Text("只要 RAW 时，没有 RAW 的照片导出 JPEG；只要 JPEG 时反过来。")
             }
             Section {
-                Button {
-                    isPickingFolder = true
-                } label: {
-                    LabeledContent("导出到", value: exports.folderName ?? "选一个文件夹…")
+                Picker("导出到", selection: Binding(get: { exports.target }, set: { exports.target = $0 })) {
+                    ForEach(ExportController.Target.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if exports.target == .folder {
+                    Button {
+                        isPickingFolder = true
+                    } label: {
+                        LabeledContent("文件夹", value: exports.folderName ?? "选一个文件夹…")
+                    }
                 }
             } header: {
-                Text("文件夹")
+                Text("导出到")
             } footer: {
-                Text("在“文件”里选：本机、iCloud 云盘、外接盘都行。文件直接放在这个文件夹里，名字和卡上的一样；只复制不覆盖，文件夹里已有同名的就当导出过、跳过，所以中断了再导一次就是接着导。")
+                switch exports.target {
+                case .folder:
+                    Text("在“文件”里选：本机、iCloud 云盘、外接盘都行。文件直接放在这个文件夹里，名字和卡上的一样；只复制不覆盖，文件夹里已有同名的就当导出过、跳过，所以中断了再导一次就是接着导。")
+                case .photos:
+                    Text("JPEG 存成照片；选“RAW + JPEG”时 ARW 作为同一张照片的 RAW 一起存，只有 RAW 的存 RAW。只申请“添加照片”的权限。“照片”里认不出存过的，同一张再存会多一份。")
+                }
             }
             Section {
                 Button {
@@ -179,7 +190,7 @@ struct ExportPanel: View {
                 if report.notAttempted > 0 || !report.failures.isEmpty {
                     Button("再导一次（接着导，导过的跳过）") {
                         exports.reset()
-                        model.startExport(scope)
+                        model.startExport(resumeScope(after: report))
                     }
                     .disabled(model.exportBlocker != nil)
                 }
@@ -188,6 +199,14 @@ struct ExportPanel: View {
                     .accessibilityIdentifier("导出完成")
             }
         }
+    }
+
+    /// 文件夹按名字跳过导过的，整批再导就行；“照片”认不出存过的，只导这次没存成的。
+    private func resumeScope(after report: ExportReport) -> ExportScope {
+        guard exports.runningTarget == .photos else { return scope }
+        let done = Set(report.exportedPhotoIDs)
+        let rest = scope.photoIDs.filter { !done.contains($0) }
+        return ExportScope(title: "没存成的 \(rest.count) 张", photoIDs: rest)
     }
 
     private func headline(_ report: ExportReport) -> String {
