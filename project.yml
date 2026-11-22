@@ -26,7 +26,7 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "6.0"
         CODE_SIGN_STYLE: Automatic
-        MARKETING_VERSION: "0.0.1"
+        MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         # 生成的 Info.plist 再合并这个文件（继续处理任务的标识符，F-07）。
