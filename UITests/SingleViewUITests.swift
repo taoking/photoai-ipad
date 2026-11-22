@@ -44,6 +44,24 @@ final class SingleViewUITests: XCTestCase {
         XCTAssertTrue(waitFor(three, value: "当前"))
     }
 
+    /// 照片左边上下拖动改星级（照 Lightroom iPad）：往上拖 140 点是 3 星，再往下拖 70 点是 2 星；不翻页、不回网格。
+    func testDragOnLeftChangesRating() {
+        launch(autoAdvance: false)
+        openFirst()
+        app.buttons["清除星级"].tap()
+        XCTAssertTrue(waitFor(app.buttons["3 星"], value: ""))
+        let start = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.6))
+        // 慢慢拖、停一下再松手：拖得快时 XCUITest 松手前最后一段送不到（140 点只收到 109 点）。
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -140)), withVelocity: 300, thenHoldForDuration: 0.2)
+        XCTAssertTrue(waitFor(app.buttons["3 星"], value: "当前"))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 70)), withVelocity: 300, thenHoldForDuration: 0.2)
+        XCTAssertTrue(waitFor(app.buttons["2 星"], value: "当前"))
+        XCTAssertTrue(pageIndex.hasPrefix("1 / "))
+        XCTAssertTrue(app.buttons["返回网格"].exists)
+        app.buttons["single-撤销"].tap()
+        XCTAssertTrue(waitFor(app.buttons["3 星"], value: "当前"))
+    }
+
     /// 左右滑翻页、胶片条跳页、往下滑回网格。
     func testSwipePagingAndDismiss() {
         launch(autoAdvance: false)

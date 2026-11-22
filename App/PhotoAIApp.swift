@@ -25,7 +25,13 @@ struct PhotoAIApp: App {
     private static func makeState() -> LaunchState {
         do {
             let model = try AppModel()
-            return .ready(model, ThumbnailCache(store: model.previewStore), PreviewImageCache(store: model.previewStore))
+            let thumbnails = ThumbnailCache(store: model.previewStore)
+            let previews = PreviewImageCache(store: model.previewStore)
+            model.onLibraryCleared = {
+                thumbnails.removeAll()
+                previews.removeAll()
+            }
+            return .ready(model, thumbnails, previews)
         } catch {
             appLog("库打不开：\(error)")
             return .failed("\(error)")
