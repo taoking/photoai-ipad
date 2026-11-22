@@ -48,6 +48,13 @@ final class CollectionUITests: XCTestCase {
         sidebarRow(name).tap()
         waitForCount(2)
 
+        // 侧栏按住收藏夹“导出…”：范围的名字和张数隔开（原来名字“111”、26 张显示成“111 26 张”）。
+        sidebarRow(name).press(forDuration: 1)
+        app.buttons["导出…"].tap()
+        let scope = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "收藏夹「\(name)」 · 2 张")).firstMatch
+        XCTAssertTrue(scope.waitForExistence(timeout: 3))
+        app.buttons["关闭"].tap()
+
         // 移出一张，再撤销。
         app.buttons["选择"].tap()
         grid.cells.element(boundBy: 0).tap()

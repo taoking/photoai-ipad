@@ -4,7 +4,7 @@ import PhotoAICore
 /// 导出面板导哪些照片（F-30）。
 struct ExportScope: Identifiable, Equatable {
     let id = UUID()
-    /// “所选的 12 张”“当前结果 230 张”“选过但没导出的 8 张”。
+    /// “所选的 12 张”“收藏夹「111」· 26 张”“选过但没导出的 8 张”。名字和张数之间要隔开：收藏夹叫“111”时连着写就读成了“11126 张”。
     var title: String
     var photoIDs: [PhotoID]
 }
@@ -12,14 +12,33 @@ struct ExportScope: Identifiable, Equatable {
 // MARK: - 导出（F-30 – F-32）
 
 extension AppModel {
-    /// 工具栏的“导出”：选择模式下导所选的，否则导当前结果（筛选后的）。
+    /// 选择模式下的“导出”导所选的；“更多”菜单里的“导出当前结果”导筛选后的。
     func showExport() {
         if isSelecting, !selectedIDs.isEmpty {
             exportScope = ExportScope(title: "所选的 \(selectedIDs.count) 张", photoIDs: targetIDs)
         } else {
-            let title = currentFilter.isEmpty ? "\(title(of: selection)) \(photos.count) 张" : "筛选结果 \(photos.count) 张"
-            exportScope = ExportScope(title: title, photoIDs: photos.map(\.id))
+            let name = scopeName(of: selection) + (currentFilter.isEmpty ? "" : "的筛选结果")
+            exportScope = ExportScope(title: "\(name) · \(photos.count) 张", photoIDs: photos.map(\.id))
         }
+    }
+
+    /// 侧栏按住一项的“导出…”：导这一项的全部照片，不管它记着的筛选。
+    func showExport(for item: SidebarItem) {
+        let reader = reader
+        let scope = item.scope
+        let sort = sort
+        let name = scopeName(of: item)
+        Task {
+            guard let photos = await Task.detached(operation: { try? reader.photos(in: scope, sort: sort) }).value else { return }
+            guard !photos.isEmpty else { return show("\(name)里没有照片") }
+            exportScope = ExportScope(title: "\(name) · \(photos.count) 张", photoIDs: photos.map(\.id))
+        }
+    }
+
+    /// 导出范围里的名字：收藏夹带上“收藏夹「」”，免得和日期、张数混在一起。
+    func scopeName(of item: SidebarItem) -> String {
+        if case .collection = item { return "收藏夹「\(title(of: item))」" }
+        return title(of: item)
     }
 
     /// 导出前要满足的条件；满足返回 nil。

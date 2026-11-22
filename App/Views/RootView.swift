@@ -51,6 +51,7 @@ struct SidebarView: View {
                     Image(systemName: "photo.on.rectangle")
                 }
                 .tag(SidebarItem.all)
+                .contextMenu { ExportItemButton(model: model, item: .all) }
             }
             SidebarCollections(model: model)
             ForEach(months, id: \.month) { group in
@@ -62,6 +63,7 @@ struct SidebarView: View {
                             Text("\(day.count)").foregroundStyle(.secondary).monospacedDigit()
                         }
                         .tag(SidebarItem.day(day.day))
+                        .contextMenu { ExportItemButton(model: model, item: .day(day.day)) }
                     }
                 }
             }
@@ -73,10 +75,20 @@ struct SidebarView: View {
                         Text("\(model.undatedCount)").foregroundStyle(.secondary).monospacedDigit()
                     }
                     .tag(SidebarItem.undated)
+                    .contextMenu { ExportItemButton(model: model, item: .undated) }
                 }
             }
         }
         .navigationTitle(model.isSynthetic ? "PhotoAI · 性能测试库" : "PhotoAI")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    model.isShowingSettings = true
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                }
+            }
+        }
     }
 
     /// 按月分组，月和天的顺序跟着网格的排序走。
@@ -95,7 +107,20 @@ struct SidebarView: View {
     }
 }
 
+/// 侧栏按住一项出来的“导出…”：导这一项的全部照片。
+struct ExportItemButton: View {
+    let model: AppModel
+    let item: SidebarItem
+
+    var body: some View {
+        Button("导出…", systemImage: "square.and.arrow.up") { model.showExport(for: item) }
+    }
+}
+
 /// 详情栏：标题栏（卡的状态）、工具栏、网格、导入进度。
+///
+/// 右上角只留选片时常用的：撤销、筛选、“更多”（排序、导出当前结果）、选择。读卡挪进设置（插上卡就自动读，很少要点）；
+/// 导出在选了照片以后的操作条里，或者在侧栏按住一项。
 struct LibraryScreen: View {
     @Bindable var model: AppModel
     let cache: ThumbnailCache
@@ -107,11 +132,17 @@ struct LibraryScreen: View {
                 if model.photos.isEmpty { emptyState }
             }
             .overlay { if !model.isShowingSingle { ToastView(toast: model.toast) } }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if model.stats.photoCount > 0 { FilterBar(model: model) }
-            }
-            .safeAreaInset(edge: .bottom) {
-                ImportStatusBar(model: model, importer: model.importer)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 12) {
+                    if model.isSelecting {
+                        SelectionActionBar(model: model)
+                    } else if model.staleCount > 0 {
+                        RefreshResultButton(model: model)
+                    }
+                    ImportStatusBar(model: model, importer: model.importer)
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.isSelecting)
+                .animation(.easeInOut(duration: 0.2), value: model.staleCount > 0)
             }
             .navigationTitle(model.title(of: model.selection))
             .navigationSubtitle(subtitle)
@@ -119,21 +150,11 @@ struct LibraryScreen: View {
     }
 
     private var subtitle: String {
-        // 选择模式下工具栏按钮多，“已选 N 张”放在这里。
         if model.isSelecting { return "已选 \(model.selectedIDs.count) 张" }
         let count = model.currentFilter.isEmpty ? "\(model.photos.count) 张" : "筛选出 \(model.photos.count) / \(model.source.count) 张"
-        var parts = [cardStatus, count]
+        var parts = [model.cardStatusText, count]
         if model.stats.missingFromCardCount > 0 { parts.append("卡上已删 \(model.stats.missingFromCardCount) 张") }
         return parts.joined(separator: " · ")
-    }
-
-    private var cardStatus: String {
-        if model.isSynthetic { return "性能测试库" }
-        return switch model.cardState {
-        case .connected: "卡已连接"
-        case .noBookmark: "还没读过卡"
-        case .unknown, .disconnected: "卡未连接"
-        }
     }
 
     @ViewBuilder
@@ -161,83 +182,118 @@ struct LibraryScreen: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if model.isSelecting {
-            // “完成”“全选”放左边：右边按钮多，侧栏开着时会挤进“更多”。
-            ToolbarItemGroup(placement: .topBarLeading) {
-                Button("完成") { model.exitSelection() }
-                    .fontWeight(.semibold)
+            ToolbarItem(placement: .topBarLeading) {
                 Button(model.selectedIDs.count == model.photos.count ? "全不选" : "全选") {
                     model.selectedIDs = model.selectedIDs.count == model.photos.count ? [] : Set(model.photos.map(\.id))
                 }
             }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                // 多选后批量打（F-20）。
-                Menu {
-                    ForEach((1...5).reversed(), id: \.self) { n in
-                        Button(String(repeating: "★", count: n)) { model.setRating(n) }
-                    }
-                    Button("清除星级", systemImage: "star.slash") { model.setRating(0) }
-                } label: {
-                    Label("打星", systemImage: "star")
-                }
-                .disabled(model.selectedIDs.isEmpty)
-                Menu {
-                    Button("Pick", systemImage: "flag.fill") { model.setFlag(.pick) }
-                    Button("Reject", systemImage: "xmark") { model.setFlag(.reject) }
-                    Button("清除标记", systemImage: "flag.slash") { model.setFlag(.none) }
-                } label: {
-                    Label("标记", systemImage: "flag")
-                }
-                .disabled(model.selectedIDs.isEmpty)
-                Menu {
-                    CollectionMenuItems(model: model)
-                } label: {
-                    Label("收藏夹", systemImage: "rectangle.stack.badge.plus")
-                }
-                .disabled(model.selectedIDs.isEmpty)
-                .accessibilityIdentifier("收藏夹菜单")
-                Button {
-                    model.showExport()
-                } label: {
-                    Label("导出", systemImage: "square.and.arrow.up")
-                }
-                .disabled(model.selectedIDs.isEmpty)
-                UndoButtons(model: model)
+            ToolbarItem(placement: .topBarTrailing) { UndoButtons(model: model) }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("完成") { model.exitSelection() }
+                    .fontWeight(.semibold)
             }
         } else {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                UndoButtons(model: model)
-                Button {
-                    model.readCardTapped()
-                } label: {
-                    Label("读取存储卡", systemImage: "sdcard")
-                }
-                .disabled(model.importer.isRunning)
-
+            ToolbarItem(placement: .topBarTrailing) { UndoButtons(model: model) }
+            if model.stats.photoCount > 0 {
+                ToolbarItem(placement: .topBarTrailing) { FilterButton(model: model) }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker("排序", selection: $model.sort) {
                         Text("拍摄时间：新 → 旧").tag(PhotoSort.captureDateDescending)
                         Text("拍摄时间：旧 → 新").tag(PhotoSort.captureDateAscending)
                     }
+                    .pickerStyle(.inline)
+                    Section {
+                        Button {
+                            model.showExport()
+                        } label: {
+                            Label(
+                                model.currentFilter.isEmpty ? "导出这 \(model.photos.count) 张…" : "导出筛选结果 \(model.photos.count) 张…",
+                                systemImage: "square.and.arrow.up"
+                            )
+                        }
+                        .disabled(model.photos.isEmpty)
+                    }
                 } label: {
-                    Label("排序", systemImage: "arrow.up.arrow.down")
-                }
-
-                Button {
-                    model.showExport()
-                } label: {
-                    Label("导出", systemImage: "square.and.arrow.up")
-                }
-                .disabled(model.photos.isEmpty)
-
-                Button("选择") { model.isSelecting = true }
-                    .disabled(model.photos.isEmpty)
-
-                Button {
-                    model.isShowingSettings = true
-                } label: {
-                    Label("设置", systemImage: "gearshape")
+                    Label("更多", systemImage: "ellipsis")
                 }
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("选择") { model.isSelecting = true }
+                    .disabled(model.photos.isEmpty)
+            }
         }
+    }
+}
+
+/// 选择模式下网格底部浮着的操作条：打星、标记、收藏夹、导出，图标带字，手指够得着。
+struct SelectionActionBar: View {
+    let model: AppModel
+
+    var body: some View {
+        let isEmpty = model.selectedIDs.isEmpty
+        HStack(spacing: 4) {
+            Menu {
+                ForEach((1...5).reversed(), id: \.self) { n in
+                    Button(String(repeating: "★", count: n)) { model.setRating(n) }
+                }
+                Button("清除星级", systemImage: "star.slash") { model.setRating(0) }
+            } label: {
+                actionLabel("打星", "star")
+            }
+            Menu {
+                Button("Pick", systemImage: "flag.fill") { model.setFlag(.pick) }
+                Button("Reject", systemImage: "xmark") { model.setFlag(.reject) }
+                Button("清除标记", systemImage: "flag.slash") { model.setFlag(.none) }
+            } label: {
+                actionLabel("标记", "flag")
+            }
+            Menu {
+                CollectionMenuItems(model: model)
+            } label: {
+                actionLabel("收藏夹", "rectangle.stack.badge.plus")
+            }
+            .accessibilityIdentifier("收藏夹菜单")
+            Button {
+                model.showExport()
+            } label: {
+                actionLabel("导出", "square.and.arrow.up")
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isEmpty)
+        .padding(6)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .padding(.bottom, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func actionLabel(_ title: String, _ symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.body.weight(.medium))
+            .padding(.horizontal, 16)
+            .frame(minHeight: 44)
+            .contentShape(.capsule)
+    }
+}
+
+/// 打星后结果不变（F-22），有照片已经不符合筛选时浮在网格底部。
+struct RefreshResultButton: View {
+    let model: AppModel
+
+    var body: some View {
+        Button {
+            model.refreshResult()
+        } label: {
+            Label("刷新结果（\(model.staleCount) 张已不符合）", systemImage: "arrow.clockwise")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .frame(minHeight: 40)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(.accentColor.opacity(0.35)).interactive(), in: .capsule)
+        .padding(.bottom, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }

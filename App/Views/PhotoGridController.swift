@@ -5,7 +5,9 @@ import UIKit
 /// 网格（F-11）：`UICollectionView`，按天分组，缩略图按原比例完整显示。
 ///
 /// - 捏合改每行几张（2–12），记在 UserDefaults；
-/// - 轻点打开；“选择”进入多选：轻点切换，横着拖过去连选（也支持系统的两指拖选），拖到上下边缘自动滚；
+/// - 轻点打开；长按或“选择”进入多选：长按住接着拖是连选（往哪个方向都行），选择状态下轻点切换、横着拖过去连选，
+///   拖到上下边缘自动滚。不用系统的两指拖选：捏合的头一下会被它当成两指拖，一捏就进了选择状态；
+
 /// - 数据变了只重新配置内容变了的格子，导入时网格不闪；只是星级、标记变了（照片和顺序没变）时不重做快照，
 ///   直接改看得见的格子（PF-6）。
 @MainActor
@@ -95,6 +97,11 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
         collectionView.addGestureRecognizer(pan)
         // 先看是不是横着拖选；不是（或者不在选择状态）马上失败，滚动照常。
         collectionView.panGestureRecognizer.require(toFail: pan)
+
+        // 按住不动 0.35 秒才算长按，手指先动了就是滚动，不受影响。
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.35
+        collectionView.addGestureRecognizer(longPress)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -335,15 +342,9 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
         if isSelecting { reportSelection() }
     }
 
+    /// 系统的两指拖选关掉，见类型说明。
     func collectionView(_ collectionView: UICollectionView, shouldBeginMultipleSelectionInteractionAt indexPath: IndexPath) -> Bool {
-        true
-    }
-
-    func collectionView(_ collectionView: UICollectionView, didBeginMultipleSelectionInteractionAt indexPath: IndexPath) {
-        if !isSelecting {
-            setSelecting(true)
-            onBeginSelecting?()
-        }
+        false
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
@@ -382,6 +383,34 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
         // 横着拖才是连选，竖着拖照常滚动。
         let velocity = pan.velocity(in: collectionView)
         return abs(velocity.x) > abs(velocity.y)
+    }
+
+    /// 长按：没在选择状态就进入，按住的那张选上（已选的取消），接着拖是连选。
+    @objc private func handleLongPress(_ press: UILongPressGestureRecognizer) {
+        let location = press.location(in: collectionView)
+        lastPanLocation = location
+        switch press.state {
+        case .began:
+            guard let indexPath = collectionView.indexPathForItem(at: location) else { return }
+            if !isSelecting {
+                setSelecting(true)
+                onBeginSelecting?()
+            }
+            let flat = flatIndex(indexPath)
+            let selected = Set((collectionView.indexPathsForSelectedItems ?? []).map(flatIndex))
+            dragSelection = DragSelection(start: flat, selecting: !selected.contains(flat), before: selected, current: flat)
+            applyDrag(to: flat)
+            // 马上报上去：进入选择状态后界面会更新一次，按模型里的选择重新同步，晚报了这一张会被取消。
+            reportSelection()
+        case .changed:
+            updateDrag(at: location)
+            updateAutoScroll(location: press.location(in: view))
+        default:
+            guard dragSelection != nil else { return }
+            dragSelection = nil
+            stopAutoScroll()
+            reportSelection()
+        }
     }
 
     @objc private func handleDragSelect(_ pan: UIPanGestureRecognizer) {

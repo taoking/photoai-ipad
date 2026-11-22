@@ -247,6 +247,16 @@ final class AppModel {
         }
     }
 
+    /// 标题栏、设置里的卡的状态。
+    var cardStatusText: String {
+        if isSynthetic { return "性能测试库" }
+        return switch cardState {
+        case .connected: "卡已连接"
+        case .noBookmark: "还没读过卡"
+        case .unknown, .disconnected: "卡未连接"
+        }
+    }
+
     private func setCardState(_ state: CardState) {
         guard state != cardState else { return }
         appLog("卡的状态：\(Self.describe(cardState)) → \(Self.describe(state))")
