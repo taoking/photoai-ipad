@@ -19,6 +19,7 @@ struct SingleView: View {
         }
         .background(Color.black.ignoresSafeArea())
         .overlay(alignment: .center) { ToastView(toast: model.toast) }
+        .modifier(CollectionPrompts(model: model, isActive: true))
         .statusBarHidden(!chromeVisible)
         .environment(\.colorScheme, .dark)
         .persistentSystemOverlays(chromeVisible ? .automatic : .hidden)
@@ -93,6 +94,8 @@ struct SingleView: View {
                 RatingButtons(rating: model.currentPhoto?.rating ?? 0) { model.setRating($0) }
                 Divider().frame(height: 28)
                 FlagButtons(flag: model.currentPhoto?.flag ?? .none) { model.setFlag($0) }
+                Divider().frame(height: 28)
+                CollectionButton(model: model)
                 Spacer(minLength: 8)
                 Toggle(isOn: Binding(get: { model.autoAdvance }, set: { model.setAutoAdvance($0) })) {
                     Label("自动前进", systemImage: "forward.end")
@@ -216,6 +219,7 @@ struct InfoPanel: View {
                 Section("选片") {
                     row("星级", detail.summary.rating == 0 ? "未评分" : String(repeating: "★", count: detail.summary.rating))
                     row("标记", detail.summary.flag.displayName)
+                    row("收藏夹", detail.collectionNames.joined(separator: "、"))
                     row("导出过", detail.lastExportedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "没有")
                 }
                 Section("文件") {
@@ -293,14 +297,16 @@ struct PagerView: UIViewControllerRepresentable {
         controller.onShowedPreview = { model.pageDidShowPreview($0) }
         controller.onRate = { model.setRating($0) }
         controller.loadOriginal = { id, size in await model.loadOriginal(id, maximumPixelSize: size) }
-        controller.undo = { model.undo() }
-        controller.redo = { model.redo() }
+        controller.onKey = { model.perform($0) }
         controller.modelUndoManager = model.undoManager
         return controller
     }
 
     func updateUIViewController(_ controller: PhotoPagerController, context: Context) {
-        controller.update(photos: model.photos, current: model.currentPhotoID, cardConnected: model.cardState == .connected)
+        controller.update(
+            photos: model.photos, current: model.currentPhotoID, cardConnected: model.cardState == .connected,
+            canTakeFocus: model.collectionPrompt == nil
+        )
     }
 }
 

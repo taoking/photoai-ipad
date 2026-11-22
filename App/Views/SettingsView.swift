@@ -1,5 +1,6 @@
 import PhotoAICore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 设置（F-50）：存储用量、自动前进、导出、清卡、诊断。
 struct SettingsView: View {
@@ -26,11 +27,15 @@ struct SettingsView: View {
                     Toggle("自动前进（打星、标记后跳到下一张）", isOn: Binding(get: { model.autoAdvance }, set: { model.setAutoAdvance($0) }))
                 }
                 Section("导出") {
+                    Picker("导出到", selection: Binding(get: { model.exports.target }, set: { model.exports.target = $0 })) {
+                        ForEach(ExportController.Target.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
                     LabeledContent("导出文件夹", value: model.exports.folderName ?? "还没选")
                     Picker("文件", selection: Binding(get: { model.exports.files }, set: { model.exports.files = $0 })) {
                         ForEach(ExportRequest.Files.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
                 }
+                RatingFilesSection(model: model)
                 Section {
                     NavigationLink("清卡…") { ClearCardView(model: model) }
                 } footer: {
@@ -91,7 +96,7 @@ struct ClearCardView: View {
                         }
                     }
                 } footer: {
-                    Text("打过星或 Pick、一次都没导出过的照片。")
+                    Text("打过星、Pick 或者在收藏夹里，一次都没导出过的照片。")
                 }
                 Section {
                     Button("清卡", role: .destructive) { isConfirming = true }
@@ -140,4 +145,141 @@ private struct PushedExportPanel: View {
             .navigationBarBackButtonHidden(model.exports.isRunning)
             .onDisappear { model.exports.reset() }
     }
+}
+
+/// 星级文件（F-34、F-51）：带回 Mac 版用它的“从文件导入星级”；也能把 Mac 上写的星级文件导进来。
+private struct RatingFilesSection: View {
+    @Bindable var model: AppModel
+    @State private var exportDocument: TextDocument?
+    @State private var isImporting = false
+    @State private var pending: PendingImport?
+
+    private struct PendingImport: Identifiable {
+        let id = UUID()
+        var fileName: String
+        var plan: RatingImportPlan
+    }
+
+    var body: some View {
+        Section {
+            Button("导出星级文件…") {
+                Task {
+                    guard let export = await model.ratingExport() else { return }
+                    guard export.photoCount > 0 else { return model.message = "还没有打过星的照片。" }
+                    exportDocument = TextDocument(text: export.text)
+                }
+            }
+            Button("从文件导入星级…") { isImporting = true }
+        } header: {
+            Text("星级文件")
+        } footer: {
+            Text("每行“文件名  星级”，如“DSC01064  4”。导出的文件在 Mac 版用“从文件导入星级”读；导入时先看对上了哪些，确认后才写，可以撤销。")
+        }
+        .fileExporter(
+            isPresented: Binding(get: { exportDocument != nil }, set: { if !$0 { exportDocument = nil } }),
+            document: exportDocument, contentType: .markdownText, defaultFilename: "星级 \(Self.today).md"
+        ) { result in
+            switch result {
+            case .success(let url): appLog("导出星级文件 \(url.lastPathComponent)")
+            case .failure(let error): model.message = "存不了星级文件：\(error.localizedDescription)"
+            }
+            exportDocument = nil
+        }
+        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.markdownText, .plainText]) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                switch await model.planRatingImport(url) {
+                case .success(let plan): pending = PendingImport(fileName: url.lastPathComponent, plan: plan)
+                case .failure(let failure): model.message = failure.message
+                }
+            }
+        }
+        .sheet(item: $pending) { pending in
+            RatingImportConfirm(model: model, fileName: pending.fileName, plan: pending.plan)
+        }
+    }
+
+    private static var today: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+}
+
+/// 导入星级前的确认：对上几张、各几星，没对上的行、忽略的行。
+private struct RatingImportConfirm: View {
+    let model: AppModel
+    let fileName: String
+    let plan: RatingImportPlan
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(fileName) {
+                    LabeledContent("对上的照片", value: "\(plan.changes.count) 张")
+                    LabeledContent("星级会变的", value: "\(plan.changedCount) 张")
+                    ForEach((1...5).reversed(), id: \.self) { n in
+                        if let count = plan.countsByRating[n] { LabeledContent(String(repeating: "★", count: n), value: "\(count) 张") }
+                    }
+                }
+                if !plan.conflicts.isEmpty {
+                    Section("同一张写了几次，以后面的为准") {
+                        ForEach(plan.conflicts, id: \.photo.id) { conflict in
+                            LabeledContent(conflict.photo.baseName, value: conflict.ratings.map(String.init).joined(separator: " → "))
+                        }
+                    }
+                }
+                if !plan.unmatched.isEmpty {
+                    Section("没对上照片的 \(plan.unmatched.count) 行") {
+                        ForEach(plan.unmatched, id: \.line) { entry in
+                            LabeledContent("第 \(entry.line) 行", value: "\(entry.key)  \(entry.rating)")
+                        }
+                    }
+                }
+                if !plan.ignored.isEmpty {
+                    Section("格式不对、忽略的 \(plan.ignored.count) 行") {
+                        ForEach(plan.ignored, id: \.line) { line in
+                            LabeledContent("第 \(line.line) 行", value: line.text)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("从文件导入星级")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("导入 \(plan.changedCount) 张") {
+                        model.applyRatingImport(plan, fileName: fileName)
+                        dismiss()
+                    }
+                    .disabled(plan.changedCount == 0)
+                }
+            }
+        }
+    }
+}
+
+/// 导出星级文件用的文本文档。
+struct TextDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.markdownText, .plainText]
+    var text: String
+
+    init(text: String) { self.text = text }
+
+    init(configuration: ReadConfiguration) throws {
+        text = configuration.file.regularFileContents.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+
+extension UTType {
+    /// `.md`。系统不一定认识，认不出就当普通文本。
+    static let markdownText = UTType(filenameExtension: "md", conformingTo: .plainText) ?? .plainText
 }

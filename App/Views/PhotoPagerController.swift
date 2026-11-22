@@ -16,8 +16,7 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     var onShowedPreview: ((PhotoID) -> Void)?
     var onRate: ((Int) -> Void)?
     var loadOriginal: ((PhotoID, Int?) async -> OriginalResult)?
-    var undo: (() -> Void)?
-    var redo: (() -> Void)?
+    var onKey: ((KeyAction) -> Void)?
     /// 三指滑动撤销、重做走第一响应者的 `undoManager`。
     var modelUndoManager: UndoManager?
 
@@ -92,21 +91,29 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     override var canBecomeFirstResponder: Bool { true }
     override var undoManager: UndoManager? { modelUndoManager }
 
+    /// 快捷键（F-26）。
     override var keyCommands: [UIKeyCommand]? {
-        let undo = UIKeyCommand(title: "撤销", action: #selector(undoKey), input: "z", modifierFlags: .command)
-        let redo = UIKeyCommand(title: "重做", action: #selector(redoKey), input: "z", modifierFlags: [.command, .shift])
-        undo.wantsPriorityOverSystemBehavior = true
-        redo.wantsPriorityOverSystemBehavior = true
-        return [undo, redo]
+        KeyAction.commands(for: .single, action: #selector(handleKey(_:)))
     }
 
-    @objc private func undoKey() { undo?() }
-    @objc private func redoKey() { redo?() }
+    @objc private func handleKey(_ command: UIKeyCommand) {
+        guard let action = KeyAction(command) else { return }
+        if action == .zoom {
+            currentCell?.toggleFullZoom()
+        } else {
+            onKey?(action)
+        }
+    }
 
     // MARK: - 数据
 
-    func update(photos: [PhotoSummary], current: PhotoID?, cardConnected: Bool) {
+    /// `canTakeFocus`：没有输入框开着（收藏夹起名）。点了 SwiftUI 的按钮第一响应者有时会被拿走，快捷键就收不到；
+    /// 每次界面更新时要回来。
+    func update(photos: [PhotoSummary], current: PhotoID?, cardConnected: Bool, canTakeFocus: Bool) {
         guard isViewLoaded else { return }
+        if canTakeFocus, !isFirstResponder, view.window != nil {
+            DispatchQueue.main.async { [weak self] in self?.becomeFirstResponder() }
+        }
         isCardConnected = cardConnected
         let newIDs = photos.map(\.id)
         let previous = self.photos
@@ -506,6 +513,16 @@ final class ZoomPageCell: UICollectionViewCell {
         }
         let target: CGFloat = zoomView.minimumZoomScale < 0.5 ? 0.5 : zoomView.maximumZoomScale
         zoomView.zoom(to: target, around: tap.location(in: zoomView.imageView))
+    }
+
+    /// 快捷键 Z：适合屏幕 ↔ 100%，以画面中间为中心。
+    func toggleFullZoom() {
+        if !zoomView.isAtMinimumZoom {
+            zoomView.setZoomScale(zoomView.minimumZoomScale, animated: true)
+        } else {
+            let center = zoomView.convert(CGPoint(x: zoomView.bounds.midX, y: zoomView.bounds.midY), to: zoomView.imageView)
+            zoomView.zoom(to: 1, around: center)
+        }
     }
 
     // MARK: - 原图（F-13）

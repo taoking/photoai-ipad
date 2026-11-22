@@ -29,6 +29,11 @@ import Testing
         try temp.library.setFlag(.pick, for: [two])
         try temp.library.setFlag(.reject, for: [three])
         #expect(try temp.reader.clearCheck().selectedNotExportedIDs == [one, two])
+        // 收藏夹里的也算选过（F-40，P1）。
+        let collection = try temp.library.createCollection(name: "精选")
+        _ = try temp.library.addPhotos([three], to: collection)
+        #expect(try temp.reader.clearCheck().selectedNotExportedIDs == [one, two, three])
+        _ = try temp.library.removePhotos([three], from: collection)
 
         let exporter = Exporter(library: temp.library, finder: OriginalFinder(root: card.root))
         _ = try exporter.run(ExportRequest(photoIDs: [two], files: .both, destination: temp.root.appendingPathComponent("导出")))

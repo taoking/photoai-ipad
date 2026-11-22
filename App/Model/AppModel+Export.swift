@@ -17,7 +17,7 @@ extension AppModel {
         if isSelecting, !selectedIDs.isEmpty {
             exportScope = ExportScope(title: "所选的 \(selectedIDs.count) 张", photoIDs: targetIDs)
         } else {
-            let title = currentFilter.isEmpty ? "\(selection.title) \(photos.count) 张" : "筛选结果 \(photos.count) 张"
+            let title = currentFilter.isEmpty ? "\(title(of: selection)) \(photos.count) 张" : "筛选结果 \(photos.count) 张"
             exportScope = ExportScope(title: title, photoIDs: photos.map(\.id))
         }
     }
@@ -27,7 +27,7 @@ extension AppModel {
         if isSynthetic { return "性能测试库没有原图，导不了" }
         if cardState != .connected { return "插上卡才能导出" }
         if importer.isRunning { return "正在读卡，读完再导出" }
-        if exports.folderName == nil { return "先选一个导出文件夹" }
+        if exports.target == .folder, exports.folderName == nil { return "先选一个导出文件夹" }
         return nil
     }
 
@@ -40,7 +40,13 @@ extension AppModel {
             message = "插上卡才能导出"
             return
         }
-        if let error = exports.start(scope.photoIDs, cardBookmark: bookmark) { message = error }
+        Task {
+            if exports.target == .photos, !(await PhotosSaver.requestAuthorization()) {
+                message = "PhotoAI 没有添加照片的权限：在“设置”→“隐私与安全性”→“照片”里打开，或者改成导出到文件夹。"
+                return
+            }
+            if let error = exports.start(scope.photoIDs, cardBookmark: bookmark) { message = error }
+        }
     }
 }
 
@@ -84,4 +90,41 @@ extension AppModel {
         let reader = reader
         return await Task.detached { try? reader.clearCheck() }.value
     }
+}
+
+// MARK: - 星级文件（F-34、F-51）
+
+extension AppModel {
+    func ratingExport() async -> RatingExport? {
+        let reader = reader
+        return await Task.detached { try? reader.ratingExport() }.value
+    }
+
+    /// 读选中的文件、逐行找照片。读不了返回错误说明。
+    func planRatingImport(_ url: URL) async -> Result<RatingImportPlan, RatingImportFailure> {
+        let reader = reader
+        return await Task.detached {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else { return .failure(RatingImportFailure(message: "读不了 \(url.lastPathComponent)")) }
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+                return .failure(RatingImportFailure(message: "\(url.lastPathComponent) 不是文本文件（要 UTF-8）"))
+            }
+            do {
+                return .success(try reader.planRatingImport(RatingFile(text: text)))
+            } catch {
+                return .failure(RatingImportFailure(message: "\(error)"))
+            }
+        }.value
+    }
+
+    /// 确认后写库，进撤销。
+    func applyRatingImport(_ plan: RatingImportPlan, fileName: String) {
+        commit(plan.edit, title: "从文件导入星级")
+        appLog("从文件导入星级 \(fileName)：对上 \(plan.changes.count) 张、改了 \(plan.changedCount) 张，没对上 \(plan.unmatched.count) 行，忽略 \(plan.ignored.count) 行")
+    }
+}
+
+struct RatingImportFailure: Error {
+    var message: String
 }

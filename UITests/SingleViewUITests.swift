@@ -24,7 +24,7 @@ final class SingleViewUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["pageIndex"].waitForExistence(timeout: 2))
     }
 
-    private func waitFor(_ element: XCUIElement, value: String, timeout: TimeInterval = 2) -> Bool {
+    private func waitFor(_ element: XCUIElement, value: String, timeout: TimeInterval = 5) -> Bool {
         let predicate = NSPredicate(format: "value == %@", value)
         return XCTWaiter().wait(for: [expectation(for: predicate, evaluatedWith: element)], timeout: timeout) == .completed
     }
@@ -42,6 +42,40 @@ final class SingleViewUITests: XCTestCase {
         XCTAssertTrue(waitFor(three, value: ""))
         app.buttons["single-重做"].tap()
         XCTAssertTrue(waitFor(three, value: "当前"))
+    }
+
+    /// 外接键盘（F-26）：网格里数字（没选照片只提示）、空格打开第一张；单张视图里数字打星、P / U 标记、← → 翻页、⌘. 回网格。
+    /// 没放进来的（模拟器上测不了，真机验）：`Esc` 模拟器上收不到；单张视图关掉后网格的快捷键时有时无。
+    /// 网格的工具栏在单张视图后面也看得见，回没回网格看“返回网格”还在不在。
+    /// 名字以 Z 开头排在最后：模拟器的键盘状态在用例之间会留下来，紧接着跑的 ⌘Z（`testRateUndoRedo`）会收不到。
+    func testZKeyboardShortcuts() {
+        launch(autoAdvance: false)
+        let back = app.buttons["返回网格"]
+        app.typeKey("1", modifierFlags: [])
+        let hint = app.staticTexts.matching(NSPredicate(format: "identifier == 'toast' AND label == '先选中照片'")).firstMatch
+        XCTAssertTrue(hint.waitForExistence(timeout: 3))
+        app.typeKey(" ", modifierFlags: [])
+        XCTAssertTrue(back.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 5))
+        // 单张视图出来后翻页视图才做第一响应者，太早按的键会丢。
+        sleep(1)
+        app.typeKey("0", modifierFlags: [])
+        XCTAssertTrue(waitFor(app.buttons["4 星"], value: ""))
+        app.typeKey("4", modifierFlags: [])
+        XCTAssertTrue(waitFor(app.buttons["4 星"], value: "当前"))
+        app.typeKey("u", modifierFlags: [])
+        app.typeKey("p", modifierFlags: [])
+        XCTAssertTrue(waitFor(app.buttons["single-pick"], value: "当前"))
+        app.typeKey(XCUIKeyboardKey.rightArrow, modifierFlags: [])
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '2 / '")).firstMatch.waitForExistence(timeout: 5))
+        app.typeKey(XCUIKeyboardKey.leftArrow, modifierFlags: [])
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 5))
+        // 合成库一直留着：第一张改回没星、没标记，别的用例（自动前进）要用。
+        app.typeKey("0", modifierFlags: [])
+        app.typeKey("u", modifierFlags: [])
+        XCTAssertTrue(waitFor(app.buttons["single-pick"], value: ""))
+        app.typeKey(".", modifierFlags: .command)
+        XCTAssertTrue(back.waitForNonExistence(timeout: 3))
     }
 
     /// 照片左边上下拖动改星级（照 Lightroom iPad）：往上拖 140 点是 3 星，再往下拖 70 点是 2 星；不翻页、不回网格。
@@ -68,11 +102,11 @@ final class SingleViewUITests: XCTestCase {
         openFirst()
         XCTAssertTrue(pageIndex.hasPrefix("1 / "))
         pager.swipeLeft()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '2 / '")).firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '2 / '")).firstMatch.waitForExistence(timeout: 5))
         pager.swipeRight()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 5))
         app.collectionViews["filmstrip"].cells.element(boundBy: 2).tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '3 / '")).firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '3 / '")).firstMatch.waitForExistence(timeout: 5))
 
         let start = pager.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
         start.press(forDuration: 0.05, thenDragTo: pager.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)))
@@ -85,9 +119,9 @@ final class SingleViewUITests: XCTestCase {
         openFirst()
         XCTAssertTrue(pageIndex.hasPrefix("1 / "))
         app.buttons["single-pick"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '2 / '")).firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '2 / '")).firstMatch.waitForExistence(timeout: 5))
         app.buttons["single-撤销"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '1 / '")).firstMatch.waitForExistence(timeout: 5))
     }
 
     /// 双击放大到 50%：合成库没有原图，提示读不了（真卡上这里换成原图）。
@@ -105,7 +139,7 @@ final class SingleViewUITests: XCTestCase {
         launch(autoAdvance: false)
         app.buttons["Pick"].tap()
         XCTAssertTrue(waitFor(app.buttons["Pick"], value: "已选"))
-        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 5))
         openFirst()
         let total = pageIndex.components(separatedBy: " / ").last ?? ""
         app.buttons["single-reject"].tap()

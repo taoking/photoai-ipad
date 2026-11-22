@@ -15,8 +15,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
     var onSelectionChanged: ((Set<PhotoID>) -> Void)?
     var onBeginSelecting: (() -> Void)?
     var onShowedPhotos: (() -> Void)?
-    var undo: (() -> Void)?
-    var redo: (() -> Void)?
+    var onKey: ((KeyAction) -> Void)?
     /// 三指滑动撤销、重做走第一响应者的 `undoManager`（F-23）。
     var modelUndoManager: UndoManager?
 
@@ -106,16 +105,42 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
     override var canBecomeFirstResponder: Bool { true }
     override var undoManager: UndoManager? { modelUndoManager }
 
-    override var keyCommands: [UIKeyCommand]? {
-        let undo = UIKeyCommand(title: "撤销", action: #selector(undoKey), input: "z", modifierFlags: .command)
-        let redo = UIKeyCommand(title: "重做", action: #selector(redoKey), input: "z", modifierFlags: [.command, .shift])
-        undo.wantsPriorityOverSystemBehavior = true
-        redo.wantsPriorityOverSystemBehavior = true
-        return [undo, redo]
+    private var isCovered = false
+
+    /// 单张视图盖上 / 关掉。关掉后重新做第一响应者，三指撤销才回到网格（全屏盖住再拿开不会再调 `viewDidAppear`）。
+    func setCovered(_ covered: Bool) {
+        guard covered != isCovered else { return }
+        isCovered = covered
+        if !covered { reclaimFirstResponder(attempt: 0) }
     }
 
-    @objc private func undoKey() { undo?() }
-    @objc private func redoKey() { redo?() }
+    /// 刚关掉时就能要到第一响应者，但关掉的动画做完系统又把它给了别的视图：2 秒里每 0.1 秒看一次，丢了就再要。
+    private func reclaimFirstResponder(attempt: Int) {
+        guard !isCovered, attempt < 20 else { return }
+        if !isFirstResponder, view.window != nil { becomeFirstResponder() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.reclaimFirstResponder(attempt: attempt + 1) }
+    }
+
+    /// 快捷键（F-26）：打星、标记、加入收藏夹作用于选中的照片；空格打开第一张选中的（没选就是屏幕上第一张）。
+    override var keyCommands: [UIKeyCommand]? {
+        KeyAction.commands(for: .grid, action: #selector(handleKey(_:)))
+    }
+
+    @objc private func handleKey(_ command: UIKeyCommand) {
+        guard let action = KeyAction(command) else { return }
+        if action == .toggleSingle {
+            openFirstPhoto()
+        } else {
+            onKey?(action)
+        }
+    }
+
+    /// 打开第一张选中的，没选就是屏幕上第一张。
+    private func openFirstPhoto() {
+        let selected = (collectionView.indexPathsForSelectedItems ?? []).sorted()
+        let visible = collectionView.indexPathsForVisibleItems.sorted()
+        if let indexPath = selected.first ?? visible.first, let id = dataSource.itemIdentifier(for: indexPath) { onOpen?(id) }
+    }
 
     // MARK: - 数据
 
@@ -517,3 +542,4 @@ final class FrameMonitor: NSObject {
         ))
     }
 }
+
