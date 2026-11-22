@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 只放构建设置写不了的键，其余由 GENERATE_INFOPLIST_FILE 生成后合并。 -->
+<plist version="1.0">
+<dict>
+	<!-- 继续处理任务（F-07）：每次申请用“Bundle ID.continued.用途.随机串”。 -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).continued.*</string>
+	</array>
+</dict>
+</plist>

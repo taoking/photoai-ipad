@@ -54,7 +54,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("选完、导出完以后清掉本机的照片记录和预览，给下一张卡腾地方。卡上的文件不受影响。")
                 }
-                Section("诊断") {
+                Section {
                     Picker("预览并发", selection: $model.previewConcurrency) {
                         ForEach([1, 2, 3, 4], id: \.self) { Text("\($0)").tag($0) }
                     }
@@ -62,6 +62,12 @@ struct SettingsView: View {
                         get: { UserDefaults.standard.bool(forKey: DefaultsKey.useSyntheticLibrary) },
                         set: { model.setSyntheticLibrary($0) }
                     ))
+                    Button("重做全部预览和对焦框") { model.redoPreviews() }
+                        .disabled(model.isSynthetic || model.importer.isRunning)
+                } header: {
+                    Text("诊断")
+                } footer: {
+                    Text("重做预览是试“切到后台接着做”用的：星级、选择、收藏夹不变，缩略图不重做。")
                 }
                 Section("关于") {
                     let info = Bundle.main.infoDictionary ?? [:]

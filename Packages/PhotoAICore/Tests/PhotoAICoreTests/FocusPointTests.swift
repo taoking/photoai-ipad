@@ -119,7 +119,9 @@ import Testing
         let gone = card.root.appendingPathComponent("拔掉的卡")
         #expect(try FocusRunner(library: temp.library).run(cardURL: gone) == 0, "卡拔了读不了，下次再读")
         #expect(try temp.reader.pendingFocusCount() == 2)
-        #expect(try FocusRunner(library: temp.library).run(cardURL: card.root) == 2)
+        var reported: [Int] = []
+        #expect(try FocusRunner(library: temp.library).run(cardURL: card.root, progress: { reported.append($0) }) == 2)
+        #expect(reported == [2], "每批写完报一次进度")
         let area = try #require(try temp.reader.focusArea(of: photos[0].id))
         #expect(abs(area.x - 0.475) < 1e-9 && abs(area.y - 0.225) < 1e-9)
         #expect(try temp.reader.detail(of: photos[0].id)?.focus == area)
@@ -127,5 +129,11 @@ import Testing
         #expect(try temp.reader.detail(of: photos[1].id)?.focusState == "none")
         #expect(try temp.reader.pendingFocusCount() == 0)
         #expect(try FocusRunner(library: temp.library).run(cardURL: card.root) == 0, "读过的不再读")
+
+        // 诊断里的“重做全部预览和对焦框”：对焦框改回没读，星级不动。
+        try temp.library.apply(.rating(before: [photos[0].id: 0], after: [photos[0].id: 4]))
+        #expect(try temp.library.redoPreviewsAndFocus() == 2)
+        #expect(try temp.reader.pendingFocusCount() == 2)
+        #expect(try temp.reader.photos(in: .all).first { $0.id == photos[0].id }?.rating == 4)
     }
 }

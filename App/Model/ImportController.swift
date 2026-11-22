@@ -7,7 +7,8 @@ import UIKit
 
 /// 读卡导入：扫描和生成预览同时跑，网格边扫边出现、预览边做边出（F-03、F-04、F-05）。
 ///
-/// 导入时屏幕不自动锁。切到后台、拔卡时停下（扫描把没扫完的目录记下来，预览保持 pending），
+/// 导入时屏幕不自动锁。要做的预览多时申请系统的“继续处理任务”（F-07），批了的话切到后台接着做，系统显示进度。
+/// 没批、或者系统收回了，切到后台、拔卡时就停下（扫描把没扫完的目录记下来，预览保持 pending），
 /// 回到前台、重新插上再调 `start` 就是续做：没变的文件不再读 EXIF，做好的预览不再做。
 @MainActor @Observable
 final class ImportController {
@@ -28,11 +29,23 @@ final class ImportController {
     private(set) var previewsPending = 0
     private(set) var startedAt: Date?
     private(set) var finishedAt: Date?
+    /// 读对焦框的进度（预览做完后才开始读）。
+    private(set) var focusDone = 0
+    private(set) var focusTotal = 0
 
     var isRunning: Bool { phase == .running }
+    /// 这次导入系统批了继续处理任务：切到后台不用停。
+    var continuesInBackground: Bool { continued != nil }
 
     /// 进度变了（节流后），模型据此刷新网格和概况。
     @ObservationIgnored var onProgress: (() -> Void)?
+    /// 系统收回了继续处理任务（时间到了、或用户在系统的进度上点了停）：导入停下，回到前台要续做。
+    @ObservationIgnored var onContinuedExpired: (() -> Void)?
+    @ObservationIgnored private var continued: ContinuedProcessing?
+    @ObservationIgnored private var didRequestContinued = false
+    @ObservationIgnored private var lastContinuedUpdateAt = Date.distantPast
+    /// 对焦框开始读之前，库里还没读的张数（扫描中会变多），给系统的进度条算总数。
+    @ObservationIgnored private var focusEstimate = 0
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var stopFlag: StopFlag?
     @ObservationIgnored private var lastProgressAt = Date.distantPast
@@ -58,10 +71,14 @@ final class ImportController {
         previewsMade = 0
         previewsFailed = 0
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? 0
+        focusDone = 0
+        focusTotal = 0
         startedAt = Date()
         finishedAt = nil
+        didRequestContinued = false
         KeepAwake.begin()
         appLog("导入开始：预览 \(previewConcurrency) 并发，待做预览 \(previewsPending) 张；\(MemoryProbe.describe())")
+        requestContinuedIfNeeded()
 
         let library = library
         let root = access.root
@@ -97,8 +114,10 @@ final class ImportController {
                         scanDone: { scanDone.value },
                         progress: { made, failed in Task { @MainActor in self.previewsProgressed(made: made, failed: failed) } }
                     )
-                    // 预览做完（扫描也结束了）再读对焦框（F-18）：每张只读文件头，2,000 多张几秒。
-                    Self.readFocus(library: library, root: root, flag: flag)
+                    // 预览做完（扫描也结束了）再读对焦框（F-18）：每张只读文件头，2,000 多张约 20 秒。
+                    Self.readFocus(library: library, root: root, flag: flag) { done, total in
+                        Task { @MainActor in self.focusProgressed(done: done, total: total) }
+                    }
                 }
             }
             heartbeat.cancel()
@@ -156,11 +175,16 @@ final class ImportController {
         progress(made, failed)
     }
 
-    nonisolated private static func readFocus(library: Library, root: URL, flag: StopFlag) {
+    nonisolated private static func readFocus(
+        library: Library, root: URL, flag: StopFlag, progress: @escaping @Sendable (Int, Int) -> Void
+    ) {
         guard !flag.isStopped, let pending = try? library.reader.pendingFocusCount(), pending > 0 else { return }
         let started = DispatchTime.now().uptimeNanoseconds
+        progress(0, pending)
         do {
-            let done = try FocusRunner(library: library).run(cardURL: root, shouldStop: { flag.isStopped })
+            let done = try FocusRunner(library: library).run(
+                cardURL: root, shouldStop: { flag.isStopped }, progress: { progress($0, pending) }
+            )
             appLog("读对焦框：\(done) / \(pending) 张，\(msSince(started))")
         } catch {
             appLog("读对焦框写库出错：\(error)")
@@ -180,6 +204,14 @@ final class ImportController {
         previewsMade = max(previewsMade, made)
         previewsFailed = max(previewsFailed, failed)
         notifyThrottled()
+        updateContinued()
+    }
+
+    private func focusProgressed(done: Int, total: Int) {
+        guard isRunning else { return }
+        focusDone = done
+        focusTotal = total
+        updateContinued()
     }
 
     private func notifyThrottled() {
@@ -187,7 +219,47 @@ final class ImportController {
         guard Date().timeIntervalSince(lastProgressAt) > 1.5 else { return }
         lastProgressAt = Date()
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? previewsPending
+        if continued != nil, focusTotal == 0 { focusEstimate = (try? library.reader.pendingFocusCount()) ?? focusEstimate }
         onProgress?()
+        requestContinuedIfNeeded()
+    }
+
+    // MARK: - 继续处理任务（F-07）
+
+    /// 还要做的预览够多（至少约 10 秒）、应用在前台，就申请一次。扫描中新照片进库，待做的会变多，所以进度刷新时也看。
+    private func requestContinuedIfNeeded() {
+        guard isRunning, !didRequestContinued, previewsPending >= Self.continuedMinimumPreviews,
+              UIApplication.shared.applicationState == .active else { return }
+        didRequestContinued = true
+        continued = ContinuedProcessing.start(name: "import", title: "PhotoAI 读卡", subtitle: "待做预览 \(previewsPending) 张") { [weak self] in
+            Task { @MainActor in self?.continuedExpired() }
+        }
+        focusEstimate = (try? library.reader.pendingFocusCount()) ?? 0
+        lastContinuedUpdateAt = .distantPast
+        updateContinued()
+    }
+
+    /// 2,148 张约 100 秒（M1），300 张约 15 秒；更少的切到后台系统给的那点时间也差不多够。
+    private static let continuedMinimumPreviews = 300
+
+    /// 系统的进度条：预览和对焦框各算一张一个单位。
+    private func updateContinued() {
+        guard let continued, Date().timeIntervalSince(lastContinuedUpdateAt) > 0.5 else { return }
+        lastContinuedUpdateAt = Date()
+        let subtitle = focusTotal > 0
+            ? "读对焦框 \(focusDone) / \(focusTotal) 张"
+            : "预览 \(previewsMade) / \(previewsMade + previewsPending) 张"
+        continued.update(
+            completed: previewsMade + previewsFailed + focusDone,
+            total: previewsMade + previewsFailed + previewsPending + (focusTotal > 0 ? focusTotal : focusEstimate),
+            subtitle: subtitle
+        )
+    }
+
+    private func continuedExpired() {
+        guard isRunning, continued != nil else { return }
+        stopFlag?.stop("系统收回了后台时间")
+        onContinuedExpired?()
     }
 
     private func scanFinished(_ summary: ScanSummary, seconds: Double) {
@@ -202,11 +274,14 @@ final class ImportController {
         ))
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? previewsPending
         onProgress?()
+        requestContinuedIfNeeded()
         logRawSampleOnce()
     }
 
     private func finish(reason: String?, seconds: Double) {
         KeepAwake.end()
+        continued?.finish(success: reason == nil)
+        continued = nil
         finishedAt = Date()
         phase = reason.map(Phase.stopped) ?? .finished
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? 0
