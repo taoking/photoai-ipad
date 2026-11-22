@@ -74,8 +74,8 @@ import Testing
         #expect(report.exportedPhotos == 2)
     }
 
-    /// 中断后再导一次就是续传：一样的文件跳过；同名不一样的文件不覆盖，RAW 和 JPEG 一起改成 (2)。
-    @Test func rerunSkipsIdenticalAndRenamesDifferent() async throws {
+    /// 中断后再导一次就是续传：目标里有同名文件就算导出过，不比内容、不覆盖、不改名，也不去卡上读。
+    @Test func rerunSkipsSameName() async throws {
         let f = try Fixture()
         try f.card.put("DCIM/100MSDCF/DSC00001.ARW", date: dateA)
         try f.card.put("DCIM/100MSDCF/DSC00001.JPG", date: dateA)
@@ -84,14 +84,19 @@ import Testing
         _ = try f.export([id], .both)
 
         let again = try f.export([id], .both)
-        #expect(again.identicalFiles == 2 && again.copiedFiles == 0 && again.exportedPhotos == 1)
+        #expect(again.alreadyExportedFiles == 2 && again.copiedFiles == 0 && again.exportedPhotos == 1)
 
-        // 目标里的 JPG 换成别的内容（比如另一张卡上同号的照片）。
-        try Data("另一张照片".utf8).write(to: f.destination.appendingPathComponent("DSC00001.JPG"))
-        let renamed = try f.export([id], .both)
-        #expect(renamed.copiedFiles == 2 && renamed.renamedFiles == 2)
-        #expect(f.exportedNames == ["DSC00001 (2).ARW", "DSC00001 (2).JPG", "DSC00001.ARW", "DSC00001.JPG"])
-        #expect(try f.data("DSC00001.JPG") == Data("另一张照片".utf8))
+        // 只剩 JPG 同名（内容不一样也不管）：JPG 跳过，ARW 照常复制。卡拔了也不影响跳过的那个。
+        try FileManager.default.removeItem(at: f.destination.appendingPathComponent("DSC00001.ARW"))
+        try Data("别的内容".utf8).write(to: f.destination.appendingPathComponent("DSC00001.JPG"))
+        let partly = try f.export([id], .both)
+        #expect(partly.alreadyExportedFiles == 1 && partly.copiedFiles == 1 && partly.exportedPhotos == 1)
+        #expect(f.exportedNames == ["DSC00001.ARW", "DSC00001.JPG"])
+        #expect(try f.data("DSC00001.JPG") == Data("别的内容".utf8))
+
+        let unplugged = OriginalFinder(root: f.card.root.appendingPathComponent("拔了")) { false }
+        let offline = try f.export([id], .both, finder: unplugged)
+        #expect(offline.alreadyExportedFiles == 2 && offline.stoppedBy == nil && offline.exportedPhotos == 1)
     }
 
     /// 上次中断留下的临时文件在开始时清掉。

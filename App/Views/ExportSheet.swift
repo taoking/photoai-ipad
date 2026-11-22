@@ -90,7 +90,7 @@ struct ExportPanel: View {
             } header: {
                 Text("文件夹")
             } footer: {
-                Text("在“文件”里选：本机、iCloud 云盘、外接盘都行。文件直接放在这个文件夹里；只复制不覆盖，同名的改成“DSC01926 (2).ARW”，一模一样的跳过，所以中断了再导一次就是接着导。")
+                Text("在“文件”里选：本机、iCloud 云盘、外接盘都行。文件直接放在这个文件夹里，名字和卡上的一样；只复制不覆盖，文件夹里已有同名的就当导出过、跳过，所以中断了再导一次就是接着导。")
             }
             Section {
                 Button {
@@ -150,8 +150,7 @@ struct ExportPanel: View {
             Section {
                 row("导出了", "\(report.exportedPhotos) 张")
                 row("复制", "\(report.copiedFiles) 个文件，\(Bytes.text(report.bytesCopied))")
-                if report.identicalFiles > 0 { row("已有一模一样的，跳过", "\(report.identicalFiles) 个文件") }
-                if report.renamedFiles > 0 { row("同名不同内容，改了名", "\(report.renamedFiles) 个文件") }
+                if report.alreadyExportedFiles > 0 { row("已经导出过（同名），跳过", "\(report.alreadyExportedFiles) 个文件") }
                 if report.usedOtherKind > 0 { row("没有选的格式，导了另一种", "\(report.usedOtherKind) 张") }
                 let missing = report.skippedMissingPhotos + report.newlyMissingPhotoIDs.count
                 if missing > 0 { row("卡上已删，导不了", "\(missing) 张") }
@@ -178,7 +177,7 @@ struct ExportPanel: View {
             }
             Section {
                 if report.notAttempted > 0 || !report.failures.isEmpty {
-                    Button("再导一次（接着导，一样的跳过）") {
+                    Button("再导一次（接着导，导过的跳过）") {
                         exports.reset()
                         model.startExport(scope)
                     }

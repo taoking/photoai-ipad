@@ -158,10 +158,10 @@ final class ExportController {
         case .success(let report):
             phase = .finished(report)
             appLog(String(
-                format: "导出结束 %.1f 秒：成功 %d 张（复制 %d 个文件 %.0f MB、一样的跳过 %d 个、改名 %d 个），换了格式 %d 张，卡上已删 %d 张，"
+                format: "导出结束 %.1f 秒：成功 %d 张（复制 %d 个文件 %.0f MB、同名跳过 %d 个），换了格式 %d 张，卡上已删 %d 张，"
                     + "失败 %d 个文件，没轮到 %d 张%@%@；%.1f MB/s；%@",
                 report.elapsed, report.exportedPhotos, report.copiedFiles, Double(report.bytesCopied) / 1_000_000,
-                report.identicalFiles, report.renamedFiles, report.usedOtherKind,
+                report.alreadyExportedFiles, report.usedOtherKind,
                 report.skippedMissingPhotos + report.newlyMissingPhotoIDs.count, report.failures.count, report.notAttempted,
                 report.cancelled ? "，取消了" : "", report.stoppedBy.map { "，停下：\($0)" } ?? "",
                 report.megabytesPerSecond, MemoryProbe.describe()

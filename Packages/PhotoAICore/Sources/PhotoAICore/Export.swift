@@ -1,9 +1,10 @@
 // 搬自 photoai-mac-v2 a291868 Sources/PhotoAICore/Export.swift。改了：只有一张卡，没有卷和“在线卷”；只留平铺
-// （功能列表 F-31）；卡拔了就停下，不逐张报失败；导出成功的照片记下“导出过”（`last_exported_at`，清卡检查用）。
+// （功能列表 F-31）；卡拔了就停下，不逐张报失败；导出成功的照片记下“导出过”（`last_exported_at`，清卡检查用）；
+// 目标里有同名文件就算导出过，不比内容、不改名（只有一台相机、编号不会循环，用户定的）。
 import Darwin
 import Foundation
 
-/// 导出原文件（F-30 – F-32）：只复制、不覆盖、同名自动改名，逐字节相同就跳过（中断后再导一次就是续传）。
+/// 导出原文件（F-30 – F-32）：只复制、不覆盖，目标里已有同名文件就跳过（中断后再导一次就是续传）。
 public struct ExportRequest: Sendable, Equatable {
     public enum Files: String, Sendable, CaseIterable {
         /// 只导出 RAW；没有 RAW 的导出 JPEG。
@@ -87,14 +88,12 @@ public struct ExportReport: Sendable, Equatable {
     }
 
     public var destination: URL
-    /// 至少有一个文件导出成功（或目标里已有一模一样的文件）的照片。这些照片记下了“导出过”。
+    /// 至少有一个文件导出成功（或目标里已有同名文件）的照片。这些照片记下了“导出过”。
     public var exportedPhotoIDs: [PhotoID] = []
     public var copiedFiles = 0
-    /// 目标里已经有同名、内容一样的文件（比如上次导出到一半），没有再复制。
-    public var identicalFiles = 0
+    /// 目标里已经有同名文件（上次导出过），没有再复制。
+    public var alreadyExportedFiles = 0
     public var bytesCopied = 0
-    /// 目标已有同名的不同文件，复制成了 `名字 (2).扩展名`。
-    public var renamedFiles = 0
     /// 选的格式读不到，改导出了另一种格式的照片。
     public var usedOtherKind = 0
     /// 一开始就没有现存文件的照片（卡上已删）。
@@ -177,7 +176,7 @@ public struct Exporter: Sendable {
                 photosDone: index, photoTotal: request.photoIDs.count, bytesCopied: report.bytesCopied,
                 fileName: pick.primary[0][0].fileName
             ))
-            var photo = PhotoExport(context: context, candidates: (pick.primary + pick.fallback).map { ($0[0].fileName, $0[0].fileSize) })
+            var photo = PhotoExport(context: context)
             do {
                 var exported = try photo.export(pick.primary, report: &report)
                 if exported == 0, !pick.fallback.isEmpty {
@@ -208,14 +207,6 @@ public struct Exporter: Sendable {
         ))
         report.elapsed = Date().timeIntervalSince(started)
         return report
-    }
-
-    /// `DSC01926.ARW` 的第 n 个名字：`DSC01926.ARW`、`DSC01926 (2).ARW`、`DSC01926 (3).ARW`……
-    static func numberedName(_ name: String, _ n: Int) -> String {
-        guard n > 1 else { return name }
-        let ext = (name as NSString).pathExtension
-        let stem = (name as NSString).deletingPathExtension
-        return ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
     }
 
     static let partSuffix = ".photoai-part"
@@ -260,28 +251,29 @@ struct ExportContext {
     }
 }
 
-/// 导出一张照片。同一张照片的 RAW 和 JPEG 用同一个编号（`DSC01926 (2).ARW` 和 `DSC01926 (2).JPG`），配对不拆开。
+/// 导出一张照片。文件名和卡上的一样；目标里已有同名文件就当导出过，跳过。
 struct PhotoExport {
     let context: ExportContext
-    /// 这张照片可能导出的全部文件（名字、大小），选编号时一起看。
-    let candidates: [(name: String, size: Int)]
     var missingLocationIDs: [Int] = []
-    /// 用的编号（1 表示不加编号）。
-    private var number: Int?
 
-    init(context: ExportContext, candidates: [(name: String, size: Int)]) {
+    init(context: ExportContext) {
         self.context = context
-        self.candidates = candidates
     }
 
     private var folder: URL { context.destination }
     private var chunkSize: Int { context.exporter.chunkSize }
     private var isCancelled: Bool { context.isCancelled() }
 
-    /// 导出这些文件，返回成功的文件数（含目标里已有一样的）。读不到的文件记进报告。
+    /// 导出这些文件，返回成功的文件数（含目标里已有同名的）。读不到的文件记进报告。
     mutating func export(_ groups: [[OriginalSource]], report: inout ExportReport) throws -> Int {
         var exported = 0
         for locations in groups {
+            // 先看目标：已有同名文件就不去卡上读。正式名字只在写完、落盘后才出现，所以不会是半截文件。
+            if FileManager.default.fileExists(atPath: folder.appendingPathComponent(locations[0].fileName).path) {
+                report.alreadyExportedFiles += 1
+                exported += 1
+                continue
+            }
             var done = false
             var problems: [String] = []
             for source in locations {
@@ -299,12 +291,11 @@ struct PhotoExport {
                     defer { Darwin.close(fd) }
                     do {
                         switch try copy(fd: fd, size: size, modified: modified, name: source.fileName) {
-                        case .copied(let renamed):
+                        case .copied:
                             report.copiedFiles += 1
                             report.bytesCopied += size
-                            if renamed { report.renamedFiles += 1 }
-                        case .identical:
-                            report.identicalFiles += 1
+                        case .alreadyExported:
+                            report.alreadyExportedFiles += 1
                         }
                         done = true
                     } catch CopyFailure.source(let reason) {
@@ -325,46 +316,24 @@ struct PhotoExport {
         return exported
     }
 
-    enum CopyOutcome { case copied(renamed: Bool), identical }
+    enum CopyOutcome { case copied, alreadyExported }
     enum CopyFailure: Error { case source(String) }
 
-    private mutating func currentNumber() -> Int {
-        if let number { return number }
-        // 从 1 开始找一个编号，让这张照片的每个文件名都还没被占用（或者占用的大小一样，可能就是上次导出的）。
-        var n = 1
-        while candidates.contains(where: { candidate in
-            let url = folder.appendingPathComponent(Exporter.numberedName(candidate.name, n))
-            return FileManager.default.fileExists(atPath: url.path)
-                && (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) != candidate.size
-        }) {
-            n += 1
-        }
-        number = n
-        return n
-    }
-
     /// 复制一个文件。先写临时文件，写完、落盘后再改成正式的名字；改名不覆盖已有文件。
-    private mutating func copy(fd: Int32, size: Int, modified: timespec, name: String) throws -> CopyOutcome {
-        var n = currentNumber()
-        while true {
-            let target = folder.appendingPathComponent(Exporter.numberedName(name, n))
-            if FileManager.default.fileExists(atPath: target.path) {
-                if try sameContents(fd: fd, size: size, as: target) { return .identical }
-                n += 1
-                continue
-            }
-            let temp = folder.appendingPathComponent(".\(name).\(UUID().uuidString)\(Exporter.partSuffix)")
-            try write(fd: fd, size: size, modified: modified, to: temp)
-            switch Self.renameExclusive(temp, to: target) {
-            case 0:
-                return .copied(renamed: n != 1)
-            case EEXIST:
-                unlink(temp.path)
-                n += 1
-            case let code:
-                unlink(temp.path)
-                throw ExportStop.stopped("改名失败 \(target.lastPathComponent)：\(String(cString: strerror(code)))")
-            }
+    private func copy(fd: Int32, size: Int, modified: timespec, name: String) throws -> CopyOutcome {
+        let target = folder.appendingPathComponent(name)
+        let temp = folder.appendingPathComponent(".\(name).\(UUID().uuidString)\(Exporter.partSuffix)")
+        try write(fd: fd, size: size, modified: modified, to: temp)
+        switch Self.renameExclusive(temp, to: target) {
+        case 0:
+            return .copied
+        case EEXIST:
+            // 复制的时候目标里出现了同名文件：照样当导出过。
+            unlink(temp.path)
+            return .alreadyExported
+        case let code:
+            unlink(temp.path)
+            throw ExportStop.stopped("改名失败 \(target.lastPathComponent)：\(String(cString: strerror(code)))")
         }
     }
 
@@ -398,31 +367,6 @@ struct PhotoExport {
         futimens(out, &times)
         guard fsync(out) == 0 else { throw ExportStop.stopped(Self.destinationMessage(errno, temp)) }
         finished = true
-    }
-
-    /// 目标里同名的文件和源文件逐字节相同吗？
-    private func sameContents(fd: Int32, size: Int, as target: URL) throws -> Bool {
-        guard (try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize) == size else { return false }
-        let other = Darwin.open(target.path, O_RDONLY)
-        guard other >= 0 else { return false }
-        defer { Darwin.close(other) }
-        guard lseek(fd, 0, SEEK_SET) == 0 else { throw CopyFailure.source("读不了：\(String(cString: strerror(errno)))") }
-        let a = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
-        let b = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
-        defer { a.deallocate(); b.deallocate() }
-        while true {
-            if isCancelled { throw ExportStop.cancelled }
-            let count = read(fd, a, chunkSize)
-            if count < 0 { throw CopyFailure.source("读到一半出错：\(String(cString: strerror(errno)))") }
-            if count == 0 { return true }
-            var filled = 0
-            while filled < count {
-                let got = read(other, b + filled, count - filled)
-                guard got > 0 else { return false }
-                filled += got
-            }
-            if memcmp(a, b, count) != 0 { return false }
-        }
     }
 
     /// 改名但不覆盖：`renamex_np(RENAME_EXCL)`；文件系统不支持时用硬链接，再不行先查再改。返回 0 或 errno。
