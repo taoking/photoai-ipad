@@ -60,7 +60,7 @@ final class ImportController {
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? 0
         startedAt = Date()
         finishedAt = nil
-        UIApplication.shared.isIdleTimerDisabled = true
+        KeepAwake.begin()
         appLog("导入开始：预览 \(previewConcurrency) 并发，待做预览 \(previewsPending) 张；\(MemoryProbe.describe())")
 
         let library = library
@@ -193,7 +193,7 @@ final class ImportController {
     }
 
     private func finish(reason: String?, seconds: Double) {
-        UIApplication.shared.isIdleTimerDisabled = false
+        KeepAwake.end()
         finishedAt = Date()
         phase = reason.map(Phase.stopped) ?? .finished
         previewsPending = (try? library.reader.pendingPreviewCount()) ?? 0

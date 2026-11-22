@@ -63,6 +63,9 @@ final class ThumbnailCache: @unchecked Sendable {
         for size in [Size.small, .medium, .full] { cache.removeObject(forKey: key(id, size)) }
     }
 
+    /// 清卡后：照片 id 会从 1 重新用起，旧图一张都不能留。
+    func removeAll() { cache.removeAllObjects() }
+
     /// ImageIO 按长边缩小并当场解码（`ShouldCacheImmediately`），交给界面的是解好的位图。
     static func decode(_ url: URL, maxPixelSize: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {

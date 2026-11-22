@@ -20,6 +20,11 @@ final class FilmstripController: UIViewController, UICollectionViewDataSource, U
 
     required init?(coder: NSCoder) { fatalError("不从 storyboard 建") }
 
+    // 默认的视图是整屏大，第一次布局前就加载数据会一下建几百格；先给胶片条的高度。
+    override func loadView() {
+        view = UIView(frame: CGRect(x: 0, y: 0, width: 1000, height: 56))
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         let layout = UICollectionViewFlowLayout()

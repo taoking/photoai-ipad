@@ -43,6 +43,7 @@ final class AppModel {
     let reader: LibraryReader
     let previewStore: PreviewStore
     let importer: ImportController
+    let exports: ExportController
     /// 用的是 1 万张的合成库（性能测试，PF-1、PF-2），不读卡。
     let isSynthetic: Bool
 
@@ -79,6 +80,9 @@ final class AppModel {
     var isSelecting = false
     var selectedIDs: Set<PhotoID> = []
     var isPickingCard = false
+    /// 打开着的导出面板（F-30）：导哪些照片。
+    var exportScope: ExportScope?
+    var isShowingSettings = false
     var message: String?
     var toast: Toast?
 
@@ -118,6 +122,8 @@ final class AppModel {
     @ObservationIgnored var pageStarted: UInt64?
     @ObservationIgnored private var didLogFirstGrid = false
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// 清卡后清掉界面的图片缓存（照片 id 会从 1 重新用起）。
+    @ObservationIgnored var onLibraryCleared: (() -> Void)?
 
     init() throws {
         let defaults = UserDefaults.standard
@@ -143,7 +149,9 @@ final class AppModel {
         reader = try library.makeReader()
         previewStore = PreviewStore(root: paths.previews)
         importer = ImportController(library: library)
+        exports = ExportController(library: library)
         importer.onProgress = { [weak self] in self?.reloadAll() }
+        exports.onFinished = { [weak self] in self?.reloadAll() }
         #if DEBUG
         // 模拟器上调试用：启动参数 `-debugCardPath <目录>` 把卡的书签指到这个目录（选择器没法用脚本点）。
         if let path = defaults.string(forKey: "debugCardPath"),
@@ -409,6 +417,39 @@ final class AppModel {
         selectedIDs.removeAll()
     }
 
+    // MARK: - 清卡（F-40 – F-42）
+
+    /// 清卡：删掉本机库里全部照片的记录和预览、卡的书签和扫描记录。卡上的文件一概不碰。
+    func clearCard() async {
+        guard !importer.isRunning, !exports.isRunning else {
+            message = "正在读卡或导出，等做完再清卡。"
+            return
+        }
+        closeSingle()
+        exitSelection()
+        let library = library
+        let result = await Task.detached { Result { try library.clearCard() } }.value
+        switch result {
+        case .success(let cleared):
+            history = EditHistory()
+            undoManager.removeAllActions()
+            filters = [:]
+            selection = .all
+            needsResume = false
+            exports.reset()
+            onLibraryCleared?()
+            setCardState(.noBookmark)
+            reloadAll()
+            appLog(String(format: "清卡：删了 %d 张，数据库 %.0f ms，预览目录 %.0f ms；%@", cleared.deletedPhotos,
+                          cleared.databaseSeconds * 1000, cleared.previewSeconds * 1000, MemoryProbe.describe()))
+            show("清卡完成：删了 \(cleared.deletedPhotos) 张")
+        case .failure(let error):
+            appLog("清卡失败：\(error)")
+            message = "清卡失败：\(error)"
+            reloadAll()
+        }
+    }
+
     // MARK: - 诊断
 
     func setSyntheticLibrary(_ on: Bool) {
@@ -443,6 +484,7 @@ enum DefaultsKey {
     static let useSyntheticLibrary = "useSyntheticLibrary"
     static let gridColumns = "gridColumns"
     static let autoAdvance = "autoAdvance"
+    static let exportFiles = "exportFiles"
 }
 
 /// 一条短暂的提示，如“★3（12 张）”“撤销：Pick”。

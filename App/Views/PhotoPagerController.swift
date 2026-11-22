@@ -4,6 +4,7 @@ import UIKit
 /// 单张视图的翻页（F-12）：横向分页的 `UICollectionView`，每页一个能缩放的 `ZoomPageCell`。
 ///
 /// - 左右滑翻页；捏合缩放；双击放大到 50%（再双击回到适合屏幕）；没放大时往下滑回网格；轻点显示 / 隐藏工具条。
+/// - 没放大时在照片左边三分之一上下拖动改星级（照 Lightroom iPad）：往上加、往下减，松手才打。
 /// - 缩放比例按原图像素算：1 = 100%（原图一个像素对屏幕一个像素）。放大到预览不够清楚时从卡上读原图（F-13）。
 /// - 翻页时前后几张的 1600 预览先解码好（PF-7）。
 @MainActor
@@ -13,6 +14,7 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     var onToggleChrome: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onShowedPreview: ((PhotoID) -> Void)?
+    var onRate: ((Int) -> Void)?
     var loadOriginal: ((PhotoID, Int?) async -> OriginalResult)?
     var undo: (() -> Void)?
     var redo: (() -> Void)?
@@ -28,6 +30,12 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     private var currentID: PhotoID?
     private(set) var isCardConnected = false
     private var dismissPan: UIPanGestureRecognizer!
+    private var ratingPan: UIPanGestureRecognizer!
+    private let ratingHUD = RatingHUD()
+    /// 拖动开始时的星级和现在拖到的星级。
+    private var ratingStart = 0
+    private var ratingValue = 0
+    private let ratingFeedback = UISelectionFeedbackGenerator()
 
     init(previews: PreviewImageCache) {
         self.previews = previews
@@ -58,8 +66,22 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         dismissPan.delegate = self
         dismissPan.maximumNumberOfTouches = 1
         collectionView.addGestureRecognizer(dismissPan)
-        // 先看是不是往下滑；不是马上失败，翻页照常。
+        // 先看是不是往下滑、是不是在左边拖星级；都不是马上失败，翻页照常。
         collectionView.panGestureRecognizer.require(toFail: dismissPan)
+
+        ratingPan = UIPanGestureRecognizer(target: self, action: #selector(handleRatingPan(_:)))
+        ratingPan.delegate = self
+        ratingPan.maximumNumberOfTouches = 1
+        collectionView.addGestureRecognizer(ratingPan)
+        collectionView.panGestureRecognizer.require(toFail: ratingPan)
+
+        ratingHUD.translatesAutoresizingMaskIntoConstraints = false
+        ratingHUD.alpha = 0
+        view.addSubview(ratingHUD)
+        NSLayoutConstraint.activate([
+            ratingHUD.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            ratingHUD.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -92,6 +114,8 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         if newIDs != ids {
             ids = newIDs
             index = Dictionary(uniqueKeysWithValues: newIDs.enumerated().map { ($0.element, $0.offset) })
+            // 第一次布局前页的大小还是默认的 50×50：先定好，不然一屏铺几百页、每页都解码预览。
+            syncPageSize()
             collectionView.reloadData()
             collectionView.layoutIfNeeded()
             if let current, let page = index[current] { scroll(to: page, animated: false) }
@@ -131,11 +155,19 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         // 转屏、显示 / 隐藏工具条后页的大小变了：保持在同一页。
-        guard layout.itemSize != collectionView.bounds.size, collectionView.bounds.width > 0 else { return }
-        layout.itemSize = collectionView.bounds.size
-        layout.invalidateLayout()
+        guard syncPageSize() else { return }
         collectionView.layoutIfNeeded()
         if let currentID, let page = index[currentID] { scroll(to: page, animated: false) }
+    }
+
+    /// 页和翻页视图一样大。大小变了返回 true。
+    @discardableResult
+    private func syncPageSize() -> Bool {
+        let size = collectionView.bounds.size
+        guard layout.itemSize != size, size.width > 0, size.height > 0 else { return false }
+        layout.itemSize = size
+        layout.invalidateLayout()
+        return true
     }
 
     // MARK: - 页
@@ -147,6 +179,7 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         if !cell.isWired {
             cell.isWired = true
             cell.zoomView.panGestureRecognizer.require(toFail: dismissPan)
+            cell.zoomView.panGestureRecognizer.require(toFail: ratingPan)
         }
         configure(cell, page: indexPath.item)
         return cell
@@ -189,10 +222,15 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     // MARK: - 往下滑回网格
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard gestureRecognizer === dismissPan else { return true }
-        let velocity = dismissPan.velocity(in: view)
-        guard velocity.y > abs(velocity.x), let cell = currentCell else { return false }
-        return cell.zoomView.isAtMinimumZoom
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer, pan === dismissPan || pan === ratingPan else { return true }
+        // 方向看已经拖出去的距离；按住不动再拖时速度可能还是 0，只看速度会判错。
+        let translation = pan.translation(in: view)
+        let direction = translation == .zero ? pan.velocity(in: view) : translation
+        guard abs(direction.y) > abs(direction.x), let cell = currentCell, cell.zoomView.isAtMinimumZoom else { return false }
+        // 按下的地方（不是已经拖到的地方）在左边三分之一：拖星级；别的地方往下滑：回网格。
+        let start = pan.location(in: view).x - translation.x
+        let inRatingZone = start < view.bounds.width / 3
+        return pan === ratingPan ? inRatingZone && currentPhoto != nil : !inRatingZone && direction.y > 0
     }
 
     @objc private func handleDismissPan(_ pan: UIPanGestureRecognizer) {
@@ -210,6 +248,99 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
                 cell.zoomView.transform = .identity
             }
         }
+    }
+
+    // MARK: - 左边上下拖动改星级（F-20）
+
+    /// 每拖这么多点改一颗星：从 0 拖到 5 星约 200 点，一只手拇指够得着。
+    private static let pointsPerStar: CGFloat = 40
+
+    private var currentPhoto: PhotoSummary? {
+        currentID.flatMap { index[$0] }.map { photos[$0] }
+    }
+
+    @objc private func handleRatingPan(_ pan: UIPanGestureRecognizer) {
+        switch pan.state {
+        case .began:
+            ratingStart = currentPhoto?.rating ?? 0
+            ratingValue = ratingStart
+            ratingHUD.show(rating: ratingValue)
+            ratingFeedback.prepare()
+            UIView.animate(withDuration: 0.12) { self.ratingHUD.alpha = 1 }
+            followRatingPan(pan)
+        case .changed:
+            followRatingPan(pan)
+        case .ended:
+            // 拖得快时可能没有 changed 就结束了：按松手时的位置再算一次。
+            followRatingPan(pan)
+            hideRatingHUD()
+            appLog("拖动改星：\(ratingStart) → \(ratingValue)（拖了 \(Int(-pan.translation(in: view).y)) 点）")
+            if ratingValue != ratingStart { onRate?(ratingValue) }
+        default:
+            hideRatingHUD()
+        }
+    }
+
+    private func followRatingPan(_ pan: UIPanGestureRecognizer) {
+        let steps = Int((-pan.translation(in: view).y / Self.pointsPerStar).rounded(.towardZero))
+        let value = min(max(ratingStart + steps, 0), 5)
+        guard value != ratingValue else { return }
+        ratingValue = value
+        ratingHUD.show(rating: value)
+        ratingFeedback.selectionChanged()
+    }
+
+    private func hideRatingHUD() {
+        UIView.animate(withDuration: 0.25, delay: 0.15) { self.ratingHUD.alpha = 0 }
+    }
+}
+
+/// 拖星级时屏幕中间显示的五颗星和“N 星”。
+final class RatingHUD: UIView {
+    private let stars = (1...5).map { _ in UIImageView() }
+    private let label = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        layer.cornerRadius = 18
+        clipsToBounds = true
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
+        blur.frame = bounds
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(blur)
+
+        let row = UIStackView(arrangedSubviews: stars)
+        row.spacing = 10
+        let config = UIImage.SymbolConfiguration(pointSize: 34, weight: .semibold)
+        for star in stars { star.preferredSymbolConfiguration = config }
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.textColor = .white
+        label.textAlignment = .center
+        let column = UIStackView(arrangedSubviews: [row, label])
+        column.axis = .vertical
+        column.alignment = .center
+        column.spacing = 8
+        column.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(column)
+        NSLayoutConstraint.activate([
+            column.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+            column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24)
+        ])
+        accessibilityIdentifier = "ratingHUD"
+    }
+
+    required init?(coder: NSCoder) { fatalError("不从 storyboard 建") }
+
+    func show(rating: Int) {
+        for (offset, star) in stars.enumerated() {
+            let on = offset < rating
+            star.image = UIImage(systemName: on ? "star.fill" : "star")
+            star.tintColor = on ? .systemYellow : UIColor(white: 1, alpha: 0.45)
+        }
+        label.text = rating == 0 ? "无星级" : "\(rating) 星"
     }
 }
 

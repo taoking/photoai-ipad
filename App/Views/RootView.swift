@@ -23,6 +23,12 @@ struct RootView: View {
         .fullScreenCover(isPresented: Binding(get: { model.isShowingSingle }, set: { if !$0 { model.closeSingle() } })) {
             SingleView(model: model, thumbnails: cache, previews: previews)
         }
+        .sheet(item: $model.exportScope) { scope in
+            ExportSheet(model: model, scope: scope)
+        }
+        .sheet(isPresented: $model.isShowingSettings) {
+            SettingsView(model: model)
+        }
         .task { model.launched() }
         .onChange(of: scenePhase, initial: true) { _, phase in model.scenePhaseChanged(to: phase) }
     }
@@ -173,6 +179,12 @@ struct LibraryScreen: View {
                     Label("标记", systemImage: "flag")
                 }
                 .disabled(model.selectedIDs.isEmpty)
+                Button {
+                    model.showExport()
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .disabled(model.selectedIDs.isEmpty)
                 UndoButtons(model: model)
                 Button(model.selectedIDs.count == model.photos.count ? "全不选" : "全选") {
                     model.selectedIDs = model.selectedIDs.count == model.photos.count ? [] : Set(model.photos.map(\.id))
@@ -199,19 +211,20 @@ struct LibraryScreen: View {
                     Label("排序", systemImage: "arrow.up.arrow.down")
                 }
 
+                Button {
+                    model.showExport()
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .disabled(model.photos.isEmpty)
+
                 Button("选择") { model.isSelecting = true }
                     .disabled(model.photos.isEmpty)
 
-                Menu {
-                    Picker("预览并发", selection: $model.previewConcurrency) {
-                        ForEach([1, 2, 3, 4], id: \.self) { Text("预览 \($0) 并发").tag($0) }
-                    }
-                    Toggle("性能测试库（1 万张合成）", isOn: Binding(
-                        get: { UserDefaults.standard.bool(forKey: DefaultsKey.useSyntheticLibrary) },
-                        set: { model.setSyntheticLibrary($0) }
-                    ))
+                Button {
+                    model.isShowingSettings = true
                 } label: {
-                    Label("诊断", systemImage: "stethoscope")
+                    Label("设置", systemImage: "gearshape")
                 }
             }
         }

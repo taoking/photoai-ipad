@@ -291,6 +291,7 @@ struct PagerView: UIViewControllerRepresentable {
         controller.onDismiss = { model.closeSingle() }
         controller.onToggleChrome = toggleChrome
         controller.onShowedPreview = { model.pageDidShowPreview($0) }
+        controller.onRate = { model.setRating($0) }
         controller.loadOriginal = { id, size in await model.loadOriginal(id, maximumPixelSize: size) }
         controller.undo = { model.undo() }
         controller.redo = { model.redo() }
