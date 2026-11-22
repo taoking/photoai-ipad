@@ -79,9 +79,11 @@ public struct FocusRunner: Sendable {
         self.library = library
     }
 
-    /// 返回这一轮读了多少张。
+    /// 返回这一轮读了多少张。`progress` 每批写完库调一次，给的是到目前读了多少张。
     @discardableResult
-    public func run(cardURL: URL, shouldStop: @Sendable () -> Bool = { false }) throws -> Int {
+    public func run(
+        cardURL: URL, shouldStop: @Sendable () -> Bool = { false }, progress: (Int) -> Void = { _ in }
+    ) throws -> Int {
         var skipped: Set<PhotoID> = []
         var done = 0
         while !shouldStop() {
@@ -97,6 +99,7 @@ public struct FocusRunner: Sendable {
             }
             try library.saveFocus(results)
             done += results.count
+            progress(done)
         }
         return done
     }

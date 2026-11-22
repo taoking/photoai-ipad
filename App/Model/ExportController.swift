@@ -6,7 +6,8 @@ import UIKit
 
 /// 导出到文件夹（F-30 – F-32）或存到“照片”（F-33）：在后台一张一张流式复制，进度和结果给导出面板显示，耗时、速度、内存记进日志（PF-9）。
 ///
-/// 导出时屏幕常亮；切到后台系统给的时间用完就停下（停在一个文件之前），回来再导一次就是续传。
+/// 导出时屏幕常亮。张数多时申请系统的“继续处理任务”（F-07），批了的话切到后台接着导，系统显示进度；
+/// 没批（或张数少）切到后台系统给的时间用完就停下（停在一个文件之前），回来再导一次就是续传。
 @MainActor @Observable
 final class ExportController {
     enum Phase: Equatable {
@@ -49,6 +50,9 @@ final class ExportController {
     private let library: Library
     @ObservationIgnored private var cancelFlag = ExportCancelFlag()
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var continued: ContinuedProcessing?
+    /// 这么多张以上才申请继续处理任务（M3：27 张 21 秒，少的切到后台系统给的时间够导完）。
+    private static let continuedMinimumPhotos = 30
 
     init(library: Library) {
         self.library = library
@@ -109,10 +113,22 @@ final class ExportController {
         progress = ExportProgress(photosDone: 0, photoTotal: photoIDs.count, bytesCopied: 0, fileName: "")
         startedAt = Date()
         KeepAwake.begin()
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "导出") { [weak self] in
-            // 切到后台系统给的时间用完了：停在下一个文件之前，回来再导一次接着导。
-            appLog("导出：切到后台的时间用完了，停下")
-            self?.cancel()
+        if photoIDs.count >= Self.continuedMinimumPhotos {
+            continued = ContinuedProcessing.start(
+                name: "export", title: "PhotoAI 导出 \(photoIDs.count) 张", subtitle: "到\(target == .photos ? "“照片”" : "文件夹")"
+            ) { [weak self] in
+                // 系统收回了（时间到了、或用户点了停）：停在下一个文件之前，回来再导一次接着导。
+                Task { @MainActor in self?.cancel() }
+            }
+            continued?.update(completed: 0, total: photoIDs.count, subtitle: "0 / \(photoIDs.count) 张")
+        }
+        // 继续处理任务批了就不要这个：它的时间一到会把导出停掉。
+        if continued == nil {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "导出") { [weak self] in
+                // 切到后台系统给的时间用完了：停在下一个文件之前，回来再导一次接着导。
+                appLog("导出：切到后台的时间用完了，停下")
+                self?.cancel()
+            }
         }
         let files = files
         let library = library
@@ -169,6 +185,10 @@ final class ExportController {
         guard isRunning else { return }
         let previous = self.progress?.photosDone ?? 0
         self.progress = progress
+        continued?.update(
+            completed: progress.photosDone, total: progress.photoTotal,
+            subtitle: String(format: "%d / %d 张，%.0f MB", progress.photosDone, progress.photoTotal, Double(progress.bytesCopied) / 1_000_000)
+        )
         // 每 10 张记一次速度和内存（PF-9、PF-13：内存不随张数涨）。
         if progress.photosDone / 10 > previous / 10, let startedAt {
             let seconds = Date().timeIntervalSince(startedAt)
@@ -180,6 +200,12 @@ final class ExportController {
 
     private func finish(_ result: Result<ExportReport, ExportStartError>, total: Int) {
         KeepAwake.end()
+        if case .success(let report) = result {
+            continued?.finish(success: !report.cancelled && report.stoppedBy == nil)
+        } else {
+            continued?.finish(success: false)
+        }
+        continued = nil
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid

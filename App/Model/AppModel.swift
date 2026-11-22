@@ -137,6 +137,8 @@ final class AppModel {
     @ObservationIgnored var pageStarted: UInt64?
     @ObservationIgnored private var didLogFirstGrid = false
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// 在后台。批了继续处理任务时，后台照样看卡（拔卡要停下），但不新开导入。
+    @ObservationIgnored private var isInBackground = false
     /// 清卡后清掉界面的图片缓存（照片 id 会从 1 重新用起）。
     @ObservationIgnored var onLibraryCleared: (() -> Void)?
 
@@ -168,6 +170,7 @@ final class AppModel {
         importer = ImportController(library: library)
         exports = ExportController(library: library)
         importer.onProgress = { [weak self] in self?.reloadAll() }
+        importer.onContinuedExpired = { [weak self] in self?.needsResume = true }
         exports.onFinished = { [weak self] in self?.reloadAll() }
         #if DEBUG
         // 模拟器上调试用：启动参数 `-debugCardPath <目录>` 把卡的书签指到这个目录（选择器没法用脚本点）。
@@ -197,9 +200,16 @@ final class AppModel {
     func scenePhaseChanged(to phase: ScenePhase) {
         switch phase {
         case .active:
+            isInBackground = false
             endBackgroundTask()
             startPolling()
         case .background:
+            isInBackground = true
+            if importer.isRunning, importer.continuesInBackground {
+                // 系统批了继续处理任务（F-07）：接着做，接着看卡；做完了轮询自己停。
+                appLog("切到后台：接着读卡（继续处理任务）；\(MemoryProbe.describe())")
+                return
+            }
             pollTask?.cancel()
             pollTask = nil
             guard importer.isRunning else { return }
@@ -231,8 +241,12 @@ final class AppModel {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
+                // 在后台只陪着继续处理任务里的导入，导入完了（或被收回停下了）就不看了。
+                guard let self, !(self.isInBackground && !self.importer.isRunning) else { break }
                 try? await Task.sleep(for: .seconds(3))
             }
+            // 被取消的是切到后台时停的，新的轮询可能已经开了，不能清掉。
+            if !Task.isCancelled { self?.pollTask = nil }
         }
     }
 
@@ -247,7 +261,7 @@ final class AppModel {
             consecutiveFailures = 0
             let wasConnected = cardState == .connected
             setCardState(.connected)
-            if (!wasConnected || needsResume) && !importer.isRunning {
+            if (!wasConnected || needsResume) && !importer.isRunning && !isInBackground {
                 startImport()
             }
         case .failure(let failure):
@@ -480,6 +494,23 @@ final class AppModel {
     }
 
     // MARK: - 诊断
+
+    /// 诊断：1600 预览和对焦框全部重做（F-07 在真机上试后台继续处理用，不用清卡）。卡连着就马上开始。
+    func redoPreviews() {
+        guard !isSynthetic, !importer.isRunning else { return }
+        do {
+            let pending = try library.redoPreviewsAndFocus()
+            appLog("诊断：重做全部预览和对焦框，待做预览 \(pending) 张")
+            if cardState == .connected {
+                startImport()
+                message = "\(pending) 张预览开始重做。做的时候回到主屏幕，系统会显示进度；回来看看是不是一直在做。"
+            } else {
+                message = "\(pending) 张预览改成待做，插上卡就开始重做。"
+            }
+        } catch {
+            message = "没改成：\(error)"
+        }
+    }
 
     func setSyntheticLibrary(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: DefaultsKey.useSyntheticLibrary)

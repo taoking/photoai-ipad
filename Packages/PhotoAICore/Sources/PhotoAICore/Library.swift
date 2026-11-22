@@ -110,6 +110,13 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// 诊断用（在真机上试后台继续处理，F-07）：卡上有文件的照片，1600 预览和对焦框都改回没做，插着卡就重做一遍。
+    /// 缩略图、星级、选择、收藏夹都不动。返回现在待做预览的张数。
+    public func redoPreviewsAndFocus() throws -> Int {
+        try db.run("UPDATE photos SET preview_state = 'pending', focus_state = 'pending' WHERE present_location_count > 0;")
+        return try reader.pendingPreviewCount()
+    }
+
     // MARK: - 路径
 
     /// 去掉首尾的 `/`。空字符串表示卡根目录。
