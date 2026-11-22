@@ -6,6 +6,8 @@ import UIKit
 /// - 左右滑翻页；捏合缩放；双击放大到 50%（再双击回到适合屏幕）；没放大时往下滑回网格；轻点显示 / 隐藏工具条。
 /// - 没放大时在照片左边三分之一上下拖动改星级（照 Lightroom iPad）：往上加、往下减，松手才打。
 /// - 缩放比例按原图像素算：1 = 100%（原图一个像素对屏幕一个像素）。放大到预览不够清楚时从卡上读原图（F-13）。
+/// - 在一张上停 0.3 秒，屏幕比预览清楚时按屏幕尺寸换上原图（F-16）。
+/// - 对焦框（F-18）画在当前这张上，跟着缩放走。
 /// - 翻页时前后几张的 1600 预览先解码好（PF-7）。
 @MainActor
 final class PhotoPagerController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate,
@@ -15,7 +17,9 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     var onDismiss: (() -> Void)?
     var onShowedPreview: ((PhotoID) -> Void)?
     var onRate: ((Int) -> Void)?
-    var loadOriginal: ((PhotoID, Int?) async -> OriginalResult)?
+    var loadOriginal: ((PhotoID, Int?, Bool) async -> OriginalResult)?
+    /// 当前这张换上了原图（true）或回到预览（false）。
+    var onImageSource: ((PhotoID, Bool) -> Void)?
     var onKey: ((KeyAction) -> Void)?
     /// 三指滑动撤销、重做走第一响应者的 `undoManager`。
     var modelUndoManager: UndoManager?
@@ -35,6 +39,11 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     private var ratingStart = 0
     private var ratingValue = 0
     private let ratingFeedback = UISelectionFeedbackGenerator()
+    /// 当前这张的对焦框；`showsFocus` 关着时不画，“放大到对焦点”照样用。
+    private var focus: (id: PhotoID, area: FocusArea)?
+    private var showsFocus = false
+    /// 处理过的“放大到对焦点”次数。建的时候从模型拿，不然重开单张视图会按上次的次数放大一下。
+    var handledZoomToFocusRequest = 0
 
     init(previews: PreviewImageCache) {
         self.previews = previews
@@ -108,9 +117,13 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
     // MARK: - 数据
 
     /// `canTakeFocus`：没有输入框开着（收藏夹起名）。点了 SwiftUI 的按钮第一响应者有时会被拿走，快捷键就收不到；
-    /// 每次界面更新时要回来。
-    func update(photos: [PhotoSummary], current: PhotoID?, cardConnected: Bool, canTakeFocus: Bool) {
+    /// 每次界面更新时要回来。`focus`：当前这张的对焦框；`zoomToFocusRequest` 变了就放大到对焦点。
+    func update(
+        photos: [PhotoSummary], current: PhotoID?, cardConnected: Bool, canTakeFocus: Bool,
+        focus: (id: PhotoID, area: FocusArea)?, showsFocus: Bool, zoomToFocusRequest: Int
+    ) {
         guard isViewLoaded else { return }
+        defer { updateFocus(focus, shows: showsFocus, zoomRequest: zoomToFocusRequest) }
         if canTakeFocus, !isFirstResponder, view.window != nil {
             DispatchQueue.main.async { [weak self] in self?.becomeFirstResponder() }
         }
@@ -127,6 +140,7 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
             collectionView.layoutIfNeeded()
             if let current, let page = index[current] { scroll(to: page, animated: false) }
             currentID = current
+            markCurrent()
             prefetchNeighbors()
             return
         }
@@ -140,8 +154,30 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         guard let current, current != currentID, let page = index[current] else { return }
         let adjacent = currentID.flatMap { index[$0] }.map { abs($0 - page) == 1 } ?? false
         currentID = current
+        markCurrent()
         scroll(to: page, animated: adjacent)
         prefetchNeighbors()
+    }
+
+    /// 只有当前这张换原图、画对焦框。
+    private func markCurrent() {
+        for case let cell as ZoomPageCell in collectionView.visibleCells {
+            cell.isCurrent = cell.photoID != nil && cell.photoID == currentID
+        }
+    }
+
+    private func updateFocus(_ focus: (id: PhotoID, area: FocusArea)?, shows: Bool, zoomRequest: Int) {
+        self.focus = focus
+        showsFocus = shows
+        for case let cell as ZoomPageCell in collectionView.visibleCells { cell.zoomView.focusArea = drawnFocus(for: cell.photoID) }
+        guard zoomRequest != handledZoomToFocusRequest else { return }
+        handledZoomToFocusRequest = zoomRequest
+        if let focus, focus.id == currentID { currentCell?.toggleZoom(toFocus: focus.area) }
+    }
+
+    private func drawnFocus(for id: PhotoID?) -> FocusArea? {
+        guard showsFocus, let focus, focus.id == id else { return nil }
+        return focus.area
     }
 
     private func scroll(to page: Int, animated: Bool) {
@@ -165,6 +201,8 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         guard syncPageSize() else { return }
         collectionView.layoutIfNeeded()
         if let currentID, let page = index[currentID] { scroll(to: page, animated: false) }
+        // 转屏后屏幕上要的像素变了，看要不要换更大的原图。
+        currentCell?.scheduleScreenOriginal()
     }
 
     /// 页和翻页视图一样大。大小变了返回 true。
@@ -198,7 +236,10 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         cell.onSingleTap = { [weak self] in self?.onToggleChrome?() }
         cell.onShowedPreview = { [weak self] id in self?.onShowedPreview?(id) }
         cell.loadOriginal = loadOriginal
+        cell.onImageSource = { [weak self] id, original in self?.onImageSource?(id, original) }
         cell.configure(photo, previews: previews)
+        cell.zoomView.focusArea = drawnFocus(for: photo.id)
+        cell.isCurrent = photo.id == currentID
     }
 
     func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
@@ -217,6 +258,7 @@ final class PhotoPagerController: UIViewController, UICollectionViewDataSource, 
         let page = Int((collectionView.contentOffset.x / width).rounded())
         guard ids.indices.contains(page), ids[page] != currentID else { return }
         currentID = ids[page]
+        markCurrent()
         onPageChanged?(ids[page])
         prefetchNeighbors()
     }
@@ -370,12 +412,26 @@ final class ZoomPageCell: UICollectionViewCell {
     private var originalLevel: CGFloat = 0
     /// 这张没有可读的原图（只有 RAW、卡上没了），不再去卡上找。
     private var noOriginal = false
+    /// 停在这张上 0.3 秒后按屏幕尺寸换上的原图（F-16），约 15 MB；离开屏幕时放掉。
+    private var screenImage: UIImage?
+    private var screenTask: Task<Void, Never>?
 
     var isWired = false
-    var isCardConnected = false
+    var isCardConnected = false {
+        didSet { if isCardConnected, !oldValue { scheduleScreenOriginal() } }
+    }
+    /// 是翻页视图正在看的这张：只有它换原图。
+    var isCurrent = false {
+        didSet {
+            guard isCurrent != oldValue else { return }
+            if isCurrent { scheduleScreenOriginal() } else { screenTask?.cancel() }
+        }
+    }
     var onSingleTap: (() -> Void)?
     var onShowedPreview: ((PhotoID) -> Void)?
-    var loadOriginal: ((PhotoID, Int?) async -> OriginalResult)?
+    /// 照片 id、长边上限（nil 读完整的）、卡上没了要不要标“卡上已删”。
+    var loadOriginal: ((PhotoID, Int?, Bool) async -> OriginalResult)?
+    var onImageSource: ((PhotoID, Bool) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -434,8 +490,11 @@ final class ZoomPageCell: UICollectionViewCell {
         previewTask?.cancel()
         originalTask?.cancel()
         statusTask?.cancel()
+        isCurrent = false
         photoID = nil
         previewImage = nil
+        screenImage = nil
+        zoomView.focusArea = nil
         originalLevel = 0
         noOriginal = false
         noOriginalText = nil
@@ -487,20 +546,34 @@ final class ZoomPageCell: UICollectionViewCell {
             // 下一帧画出来才算翻页完成。
             DispatchQueue.main.async { [weak self] in self?.onShowedPreview?(photoID) }
         }
+        scheduleScreenOriginal()
     }
 
-    /// 回到适合屏幕，放掉原图。
+    /// 回到适合屏幕，放掉原图（包括按屏幕尺寸换上的）。
     func resetZoom() {
         originalTask?.cancel()
+        screenTask?.cancel()
         zoomView.transform = .identity
         if zoomView.zoomScale != zoomView.minimumZoomScale { zoomView.setZoomScale(zoomView.minimumZoomScale, animated: false) }
         dropOriginal()
+        if screenImage != nil {
+            screenImage = nil
+            zoomView.replaceImage(previewImage)
+            if let photoID { onImageSource?(photoID, false) }
+        }
     }
 
+    /// 放掉放大时读的原图（一张完整的约 130 MB），回到按屏幕尺寸的原图或预览。
     private func dropOriginal() {
         guard originalLevel > 0 else { return }
         originalLevel = 0
-        zoomView.replaceImage(previewImage)
+        zoomView.replaceImage(screenImage ?? previewImage)
+        if let photoID { onImageSource?(photoID, screenImage != nil) }
+    }
+
+    /// 屏幕上正在画的图的长边像素。
+    private var displayedPixels: CGFloat {
+        zoomView.imageView.image.map { max($0.size.width, $0.size.height) * $0.scale } ?? 1
     }
 
     @objc private func handleSingleTap() { onSingleTap?() }
@@ -515,6 +588,16 @@ final class ZoomPageCell: UICollectionViewCell {
         zoomView.zoom(to: target, around: tap.location(in: zoomView.imageView))
     }
 
+    /// 放大到对焦点（⇧Z）：以对焦框中心放大到 100%；已经放大了就回到适合屏幕。
+    func toggleZoom(toFocus area: FocusArea) {
+        if !zoomView.isAtMinimumZoom {
+            zoomView.setZoomScale(zoomView.minimumZoomScale, animated: true)
+            return
+        }
+        let bounds = zoomView.imageView.bounds
+        zoomView.zoom(to: 1, around: CGPoint(x: area.centerX * bounds.width, y: area.centerY * bounds.height))
+    }
+
     /// 快捷键 Z：适合屏幕 ↔ 100%，以画面中间为中心。
     func toggleFullZoom() {
         if !zoomView.isAtMinimumZoom {
@@ -522,6 +605,43 @@ final class ZoomPageCell: UICollectionViewCell {
         } else {
             let center = zoomView.convert(CGPoint(x: zoomView.bounds.midX, y: zoomView.bounds.midY), to: zoomView.imageView)
             zoomView.zoom(to: 1, around: center)
+        }
+    }
+
+    // MARK: - 按屏幕尺寸换原图（F-16）
+
+    /// 当前这张、预览已经画出来、卡连着：停 0.3 秒再读，快速翻页时不读中间的。
+    /// 转屏、隐藏工具条后屏幕上的照片变大了也再看一次（手里的图不够大才读）。
+    func scheduleScreenOriginal() {
+        screenTask?.cancel()
+        guard isCurrent, isCardConnected, !noOriginal, previewImage != nil, let id = photoID else { return }
+        screenTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.photoID == id else { return }
+            await self.loadScreenOriginal(id)
+        }
+    }
+
+    /// 适合屏幕时屏幕上要的像素比预览多一成以上才读（竖着拿 iPad 看横图、工具条占掉一块时可能不读）。
+    /// 读不到就留在预览，不提示：这是自动的，放大时会说为什么。
+    private func loadScreenOriginal(_ id: PhotoID) async {
+        guard originalLevel == 0, let loadOriginal else { return }
+        let longEdge = max(zoomView.pixelSize.width, zoomView.pixelSize.height)
+        let needed = (longEdge * zoomView.minimumZoomScale).rounded(.up)
+        guard needed > displayedPixels * 1.1 else { return }
+        let result = await loadOriginal(id, Int(needed), false)
+        guard !Task.isCancelled, photoID == id else { return }
+        switch result {
+        case .image(let image, _):
+            screenImage = UIImage(cgImage: image)
+            // 已经放大、换上了更大的原图：先不换，缩回适合屏幕时换上这张。
+            guard originalLevel == 0 else { return }
+            zoomView.replaceImage(screenImage)
+            onImageSource?(id, true)
+        case .rawOnly:
+            noOriginal = true
+        case .offline, .missing, .failed:
+            break
         }
     }
 
@@ -541,8 +661,7 @@ final class ZoomPageCell: UICollectionViewCell {
             return
         }
         let longEdge = max(zoomView.pixelSize.width, zoomView.pixelSize.height)
-        let have = originalLevel > 0 ? longEdge * originalLevel : max(previewImage.map { max($0.size.width, $0.size.height) * $0.scale } ?? 0, 1)
-        guard longEdge * scale > have * 1.15 else { return }
+        guard longEdge * scale > displayedPixels * 1.15 else { return }
         let level: CGFloat = scale <= 0.5 ? 0.5 : 1
         guard level > originalLevel else { return }
         guard isCardConnected else {
@@ -554,7 +673,7 @@ final class ZoomPageCell: UICollectionViewCell {
         showStatus("正在读原图…", autoHide: false, spinning: true)
         originalTask = Task { [weak self, loadOriginal] in
             guard let loadOriginal else { return }
-            let result = await loadOriginal(id, level < 1 ? Int((longEdge * level).rounded(.up)) : nil)
+            let result = await loadOriginal(id, level < 1 ? Int((longEdge * level).rounded(.up)) : nil, true)
             guard !Task.isCancelled, let self, self.photoID == id else { return }
             switch result {
             case .image(let image, _):
@@ -562,6 +681,7 @@ final class ZoomPageCell: UICollectionViewCell {
                 guard !self.zoomView.isAtMinimumZoom else { return self.hideStatus() }
                 self.originalLevel = level
                 self.zoomView.replaceImage(UIImage(cgImage: image))
+                self.onImageSource?(id, true)
                 self.showStatus(level < 1 ? "原图 50%" : "原图 100%", autoHide: true)
             case .rawOnly:
                 self.noOriginal = true
@@ -604,12 +724,18 @@ final class ZoomPageCell: UICollectionViewCell {
 
 /// 能缩放的图。`imageView` 的大小按原图像素 ÷ 屏幕倍数定，所以缩放比例 1 就是 100%；
 /// 换成更清楚的图（原图）时大小不变，缩放位置不跳。
+/// 对焦框不放进 `imageView`（不然线跟着放大变粗），每次滚动、缩放按照片上的位置重新摆。
 @MainActor
 final class ZoomView: UIScrollView, UIScrollViewDelegate {
     let imageView = UIImageView()
     private(set) var pixelSize = CGSize(width: 1600, height: 1067)
     var onZoomEnded: (() -> Void)?
     private var lastBounds: CGSize = .zero
+    private let focusFrame = FocusFrameView()
+    /// 要画的对焦框（转正后的照片上 0–1），nil 不画。
+    var focusArea: FocusArea? {
+        didSet { if focusArea != oldValue { layoutFocusFrame() } }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -621,6 +747,8 @@ final class ZoomView: UIScrollView, UIScrollViewDelegate {
         bouncesZoom = true
         imageView.contentMode = .scaleToFill
         addSubview(imageView)
+        focusFrame.isHidden = true
+        addSubview(focusFrame)
     }
 
     required init?(coder: NSCoder) { fatalError("不从 storyboard 建") }
@@ -637,6 +765,7 @@ final class ZoomView: UIScrollView, UIScrollViewDelegate {
         imageView.frame = CGRect(origin: .zero, size: CGSize(width: pixelSize.width / scale, height: pixelSize.height / scale))
         contentSize = imageView.frame.size
         updateZoomScales(resetToFit: true)
+        layoutFocusFrame()
     }
 
     /// 换图，大小和缩放不变。
@@ -651,6 +780,25 @@ final class ZoomView: UIScrollView, UIScrollViewDelegate {
             updateZoomScales(resetToFit: isAtMinimumZoom)
         }
         centerContent()
+        layoutFocusFrame()
+    }
+
+    private func layoutFocusFrame() {
+        guard let area = focusArea, imageView.image != nil, imageView.bounds.width > 0 else {
+            focusFrame.isHidden = true
+            return
+        }
+        let size = imageView.bounds.size
+        var rect = imageView.convert(
+            CGRect(x: area.x * size.width, y: area.y * size.height, width: area.width * size.width, height: area.height * size.height),
+            to: self
+        )
+        // 广域、自由点的框只有图宽 3%，适合屏幕时也就二三十点；再小的至少画 18 点见方，看得见。
+        let minimumSide: CGFloat = 18
+        rect = rect.insetBy(dx: min(0, (rect.width - minimumSide) / 2), dy: min(0, (rect.height - minimumSide) / 2))
+        focusFrame.frame = rect
+        focusFrame.isHidden = false
+        bringSubviewToFront(focusFrame)
     }
 
     private func updateZoomScales(resetToFit: Bool) {
@@ -685,9 +833,32 @@ final class ZoomView: UIScrollView, UIScrollViewDelegate {
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
 
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        centerContent()
+        layoutFocusFrame()
+    }
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
         onZoomEnded?()
     }
+}
+
+/// 对焦框：绿色细框，外面一圈淡淡的黑影，亮的地方也看得清。
+final class FocusFrameView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        layer.borderColor = UIColor.systemGreen.cgColor
+        layer.borderWidth = 1.5
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.6
+        layer.shadowRadius = 1.5
+        layer.shadowOffset = .zero
+        accessibilityIdentifier = "focusFrame"
+        isAccessibilityElement = true
+        accessibilityLabel = "对焦框"
+    }
+
+    required init?(coder: NSCoder) { fatalError("不从 storyboard 建") }
 }

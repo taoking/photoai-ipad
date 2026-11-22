@@ -216,6 +216,12 @@ extension AppModel {
             if isShowingSingle { closeSingle() }
         case .zoom:
             break
+        case .zoomToFocus:
+            if isShowingSingle { zoomToFocus() }
+        case .toggleFocusPoint:
+            if isShowingSingle { setShowsFocusPoint(!showsFocusPoint) }
+        case .toggleHistogram:
+            if isShowingSingle { showsHistogram.toggle() }
         case .undo:
             undo()
         case .redo:
@@ -241,6 +247,7 @@ extension AppModel {
         isShowingSingle = false
         currentPhotoID = nil
         currentDetail = nil
+        isShowingOriginal = false
     }
 
     /// 翻到某一张（胶片条、滑动翻页、自动前进）。
@@ -249,6 +256,7 @@ extension AppModel {
         pageStarted = DispatchTime.now().uptimeNanoseconds
         currentPhotoID = id
         lastSingleIndex = index
+        isShowingOriginal = false
         loadCurrentDetail()
     }
 
@@ -296,8 +304,9 @@ enum OriginalResult: Sendable {
 
 extension AppModel {
     /// 从卡上读原图（JPG / HEIF），长边不超过 `maximumPixelSize`（nil 读完整尺寸）。
-    /// 卡连着、文件却不在了：标“卡上已删”。
-    func loadOriginal(_ id: PhotoID, maximumPixelSize: Int?) async -> OriginalResult {
+    /// 卡连着、文件却不在了：标“卡上已删”。`marksMissing` 为 false（停在一张上自动换原图，F-16）时不标：
+    /// 那是看照片时自动发生的，不悄悄改照片的状态（同 Mac 版设计稿 §4.1）；放大时还会再读、再标。
+    func loadOriginal(_ id: PhotoID, maximumPixelSize: Int?, marksMissing: Bool = true) async -> OriginalResult {
         if isSynthetic { return .failed("性能测试库没有原图") }
         guard let bookmark = (try? reader.card())?.bookmark, cardState == .connected else { return .offline }
         let reader = reader
@@ -319,14 +328,42 @@ extension AppModel {
             guard let image else { return (.failed("\(found.source.fileName) 解码不了"), lookup.missingLocationIDs) }
             return (.image(image, fileName: found.source.fileName), lookup.missingLocationIDs)
         }.value
-        if !missing.isEmpty {
+        if marksMissing, !missing.isEmpty {
             let gone = (try? library.markLocationsMissing(missing)) ?? []
             appLog("读原图时发现卡上没有了：\(missing.count) 个文件，\(gone.count) 张变成卡上已删")
             reloadAll()
         }
         if case .image(let image, let name) = result {
-            appLog("读原图 \(name) \(image.width)×\(image.height)：\(msSince(started))；\(MemoryProbe.describe())")
+            appLog("\(marksMissing ? "读原图" : "换原图") \(name) \(image.width)×\(image.height)：\(msSince(started))；\(MemoryProbe.describe())")
         }
         return result
+    }
+}
+
+// MARK: - 对焦框（F-18）
+
+extension AppModel {
+    /// 当前这张的对焦框；详细信息还没读到、相机没记都是 nil。
+    var currentFocus: FocusArea? {
+        guard let detail = currentDetail, detail.summary.id == currentPhotoID else { return nil }
+        return detail.focus
+    }
+
+    /// 没有对焦框时为什么没有。
+    var currentFocusMissingReason: String? {
+        guard let detail = currentDetail, detail.summary.id == currentPhotoID, detail.focus == nil else { return nil }
+        if detail.focusState == "none" { return "这张相机没记对焦位置" }
+        return detail.summary.isOnCard ? "还没读这张的对焦框，插着卡读完会出来" : "卡上已删，读不了对焦框"
+    }
+
+    func setShowsFocusPoint(_ on: Bool) {
+        showsFocusPoint = on
+        show(on ? (currentFocusMissingReason ?? "显示对焦框") : "隐藏对焦框")
+    }
+
+    /// 以对焦框为中心放大到 100%（已经放大了就回到适合屏幕）。
+    func zoomToFocus() {
+        guard currentFocus != nil else { return show(currentFocusMissingReason ?? "还没读到对焦框") }
+        zoomToFocusRequest += 1
     }
 }

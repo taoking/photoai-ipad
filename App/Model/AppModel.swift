@@ -96,6 +96,18 @@ final class AppModel {
     var currentDetail: PhotoDetail?
     /// 回到网格时滚到这张。
     var gridScrollTarget: PhotoID?
+    /// 单张视图里正在看的是卡上的原图（不是 1600 预览），上面一行写着（F-16）。
+    var isShowingOriginal = false
+    /// 单张视图画对焦框（F-18），默认不画，同 Mac 版。
+    var showsFocusPoint: Bool {
+        didSet { UserDefaults.standard.set(showsFocusPoint, forKey: DefaultsKey.showsFocusPoint) }
+    }
+    /// 单张视图显示直方图（F-17）。
+    var showsHistogram: Bool {
+        didSet { UserDefaults.standard.set(showsHistogram, forKey: DefaultsKey.showsHistogram) }
+    }
+    /// 每次要“放大到对焦点”加一，翻页视图看到变了就放大。
+    var zoomToFocusRequest = 0
 
     /// 自动前进（F-21）：单张视图里打星、标记后跳到下一张。
     var autoAdvance: Bool {
@@ -134,6 +146,8 @@ final class AppModel {
         sort = PhotoSort(rawValue: defaults.string(forKey: DefaultsKey.sort) ?? "") ?? .captureDateDescending
         previewConcurrency = defaults.object(forKey: DefaultsKey.previewConcurrency) as? Int ?? 3
         autoAdvance = defaults.bool(forKey: DefaultsKey.autoAdvance)
+        showsFocusPoint = defaults.bool(forKey: DefaultsKey.showsFocusPoint)
+        showsHistogram = defaults.bool(forKey: DefaultsKey.showsHistogram)
 
         let paths: LibraryPaths
         if isSynthetic {
@@ -500,6 +514,8 @@ enum DefaultsKey {
     static let useSyntheticLibrary = "useSyntheticLibrary"
     static let gridColumns = "gridColumns"
     static let autoAdvance = "autoAdvance"
+    static let showsFocusPoint = "showsFocusPoint"
+    static let showsHistogram = "showsHistogram"
     static let exportFiles = "exportFiles"
     static let exportTarget = "exportTarget"
 }

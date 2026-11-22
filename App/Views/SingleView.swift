@@ -1,8 +1,8 @@
 import PhotoAICore
 import SwiftUI
 
-/// 单张视图（F-12、F-13、F-15、F-20 – F-23）：上面一行文件名、拍摄参数、撤销；中间翻页；下面星级、标记、自动前进和胶片条。
-/// 轻点照片隐藏 / 显示上下两条。
+/// 单张视图（F-12、F-13、F-15 – F-18、F-20 – F-23）：上面一行文件名、拍摄参数、撤销、直方图、对焦框；中间翻页；
+/// 下面星级、标记、自动前进和胶片条。轻点照片隐藏 / 显示上下两条（直方图跟着藏）。
 struct SingleView: View {
     @Bindable var model: AppModel
     let thumbnails: ThumbnailCache
@@ -15,6 +15,13 @@ struct SingleView: View {
             if chromeVisible { topBar }
             PagerView(model: model, previews: previews) { withAnimation(.easeInOut(duration: 0.2)) { chromeVisible.toggle() } }
                 .ignoresSafeArea(edges: chromeVisible ? [] : .all)
+                .overlay(alignment: .topTrailing) {
+                    if chromeVisible, model.showsHistogram, let id = model.currentPhotoID {
+                        HistogramOverlay(photoID: id, previews: previews)
+                            .padding(12)
+                            .transition(.opacity)
+                    }
+                }
             if chromeVisible { bottomBar }
         }
         .background(Color.black.ignoresSafeArea())
@@ -55,6 +62,13 @@ struct SingleView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.orange.opacity(0.3), in: .capsule)
                     }
+                    // F-16：正在看的是卡上的原图还是本机的预览。
+                    Text(model.isShowingOriginal ? "原图" : "预览")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(model.isShowingOriginal ? .white : .secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.secondary.opacity(model.isShowingOriginal ? 0.35 : 0.15), in: .capsule)
+                        .accessibilityIdentifier("imageSource")
                 }
                 Text(infoLine)
                     .font(.caption)
@@ -64,6 +78,7 @@ struct SingleView: View {
             }
             Spacer(minLength: 8)
             UndoButtons(model: model, identifierPrefix: "single-")
+            ViewingButtons(model: model)
             Button {
                 showInfo = true
             } label: {
@@ -108,6 +123,117 @@ struct SingleView: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 4)
+    }
+}
+
+/// 直方图（F-17）、对焦框（F-18）的开关和“放大到对焦点”。开着时图标实心。
+struct ViewingButtons: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { model.showsHistogram.toggle() }
+            } label: {
+                Label(model.showsHistogram ? "隐藏直方图" : "显示直方图", systemImage: model.showsHistogram ? "chart.bar.fill" : "chart.bar")
+            }
+            .accessibilityIdentifier("直方图")
+            Button {
+                model.setShowsFocusPoint(!model.showsFocusPoint)
+            } label: {
+                Label(model.showsFocusPoint ? "隐藏对焦框" : "显示对焦框", systemImage: "viewfinder")
+            }
+            .foregroundStyle(model.showsFocusPoint ? .green : .white)
+            .accessibilityIdentifier("对焦框")
+            if model.showsFocusPoint {
+                Button {
+                    model.zoomToFocus()
+                } label: {
+                    Label("放大到对焦点", systemImage: "plus.magnifyingglass")
+                }
+                .disabled(model.currentFocus == nil)
+                .accessibilityIdentifier("放大到对焦点")
+            }
+        }
+        .labelStyle(.iconOnly)
+        .font(.title3)
+    }
+}
+
+/// 照片右上角的直方图（F-17）：按 1600 预览算（RAW 的预览是相机内嵌的 JPEG，和相机屏幕上的直方图是同一种）。
+/// 在一张上停 0.12 秒才算，快速翻页不算中间的。
+struct HistogramOverlay: View {
+    let photoID: PhotoID
+    let previews: PreviewImageCache
+    @State private var histogram: (id: PhotoID, value: Histogram)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HistogramChart(histogram: histogram?.id == photoID ? histogram?.value : nil)
+                .frame(width: 220, height: 90)
+            if let value = histogram?.value, histogram?.id == photoID {
+                let warnings = Self.warnings(value)
+                if !warnings.isEmpty {
+                    Text(warnings.joined(separator: " · "))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .monospacedDigit()
+                }
+            }
+        }
+        .padding(8)
+        .background(.black.opacity(0.55), in: .rect(cornerRadius: 10))
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("histogram")
+        .task(id: photoID) {
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled, let image = await previews.load(photoID)?.cgImage else { return }
+            let value = await Task.detached(priority: .userInitiated) { Histogram(image: image) }.value
+            guard !Task.isCancelled, let value else { return }
+            histogram = (photoID, value)
+        }
+    }
+
+    /// 高光溢出、暗部死黑超过 0.5% 时提示，同 Mac 版。
+    static func warnings(_ histogram: Histogram) -> [String] {
+        var result: [String] = []
+        if histogram.highlightClipping > 0.005 { result.append(String(format: "高光溢出 %.1f%%", histogram.highlightClipping * 100)) }
+        if histogram.shadowClipping > 0.005 { result.append(String(format: "暗部死黑 %.1f%%", histogram.shadowClipping * 100)) }
+        return result
+    }
+}
+
+/// 红绿蓝叠加（重叠处变亮），白线是亮度。每个通道按自己除去两头的最高格归一（溢出那一格不把别的压扁）。
+struct HistogramChart: View {
+    let histogram: Histogram?
+
+    var body: some View {
+        Canvas { context, size in
+            guard let histogram else { return }
+            var colorLayer = context
+            colorLayer.blendMode = .plusLighter
+            for (channel, color) in [(histogram.red, Color.red), (histogram.green, Color.green), (histogram.blue, Color.blue)] {
+                colorLayer.fill(Self.path(channel, in: size, closed: true), with: .color(color.opacity(0.55)))
+            }
+            context.stroke(Self.path(histogram.luminance, in: size, closed: false), with: .color(.white.opacity(0.9)), lineWidth: 1)
+        }
+    }
+
+    static func path(_ counts: [UInt32], in size: CGSize, closed: Bool) -> Path {
+        let peak = max(counts[1..<255].max() ?? 1, 1)
+        let step = size.width / CGFloat(counts.count - 1)
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: size.height))
+        for (index, count) in counts.enumerated() {
+            let height = min(CGFloat(count) / CGFloat(peak), 1) * size.height
+            path.addLine(to: CGPoint(x: CGFloat(index) * step, y: size.height - height))
+        }
+        if closed {
+            path.addLine(to: CGPoint(x: size.width, y: size.height))
+            path.closeSubpath()
+        }
+        return path
     }
 }
 
@@ -215,6 +341,7 @@ struct InfoPanel: View {
                     if let width = detail.summary.width, let height = detail.summary.height {
                         row("尺寸", "\(width) × \(height)")
                     }
+                    row("对焦框", detail.focus != nil ? "有" : detail.focusState == "none" ? "相机没记" : "还没读（插着卡时读）")
                 }
                 Section("选片") {
                     row("星级", detail.summary.rating == 0 ? "未评分" : String(repeating: "★", count: detail.summary.rating))
@@ -296,16 +423,24 @@ struct PagerView: UIViewControllerRepresentable {
         controller.onToggleChrome = toggleChrome
         controller.onShowedPreview = { model.pageDidShowPreview($0) }
         controller.onRate = { model.setRating($0) }
-        controller.loadOriginal = { id, size in await model.loadOriginal(id, maximumPixelSize: size) }
+        controller.loadOriginal = { id, size, marksMissing in
+            await model.loadOriginal(id, maximumPixelSize: size, marksMissing: marksMissing)
+        }
+        controller.onImageSource = { id, original in
+            if id == model.currentPhotoID { model.isShowingOriginal = original }
+        }
         controller.onKey = { model.perform($0) }
         controller.modelUndoManager = model.undoManager
+        controller.handledZoomToFocusRequest = model.zoomToFocusRequest
         return controller
     }
 
     func updateUIViewController(_ controller: PhotoPagerController, context: Context) {
         controller.update(
             photos: model.photos, current: model.currentPhotoID, cardConnected: model.cardState == .connected,
-            canTakeFocus: model.collectionPrompt == nil
+            canTakeFocus: model.collectionPrompt == nil,
+            focus: model.currentFocus.flatMap { area in model.currentPhotoID.map { ($0, area) } },
+            showsFocus: model.showsFocusPoint, zoomToFocusRequest: model.zoomToFocusRequest
         )
     }
 }

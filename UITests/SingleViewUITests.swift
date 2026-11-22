@@ -134,6 +134,54 @@ final class SingleViewUITests: XCTestCase {
         pager.doubleTap()
     }
 
+    /// 直方图、对焦框（F-17、F-18）：开关、有框的页画框、没记的页不画、“放大到对焦点”。
+    /// 合成库每三张一张相机没记对焦位置；排序可能是新 → 旧或旧 → 新，所以翻三页，两种都要见到。
+    /// 合成库没有原图，上面一直写“预览”（F-16 的换原图真机验）。
+    func testHistogramAndFocusPoint() {
+        launch(autoAdvance: false)
+        openFirst()
+        XCTAssertEqual(app.staticTexts["imageSource"].label, "预览")
+        let histogram = app.descendants(matching: .any)["histogram"]
+        let histogramButton = app.buttons["直方图"]
+        if histogram.exists { histogramButton.tap() }
+        XCTAssertFalse(histogram.exists)
+        histogramButton.tap()
+        XCTAssertTrue(histogram.waitForExistence(timeout: 3))
+
+        let focusButton = app.buttons["对焦框"]
+        let zoomToFocus = app.buttons["放大到对焦点"]
+        if !zoomToFocus.exists { focusButton.tap() }
+        XCTAssertTrue(zoomToFocus.waitForExistence(timeout: 3))
+        let frame = app.descendants(matching: .any)["focusFrame"]
+        var sawFrame = false, sawNone = false
+        for page in 1...3 {
+            if page > 1 {
+                pager.swipeLeft()
+                XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '\(page) / '")).firstMatch.waitForExistence(timeout: 5))
+            }
+            // 详细信息（含对焦框）翻页后在后台读。
+            if frame.waitForExistence(timeout: 2) {
+                sawFrame = true
+                XCTAssertTrue(zoomToFocus.isEnabled)
+                zoomToFocus.tap()
+                // 放大后框还在画面里（以它为中心放大）。
+                let zoomed = frame.frame
+                XCTAssertTrue(pager.frame.contains(CGPoint(x: zoomed.midX, y: zoomed.midY)), "\(zoomed) 不在 \(pager.frame) 里")
+                zoomToFocus.tap()
+            } else {
+                sawNone = true
+                XCTAssertFalse(zoomToFocus.isEnabled)
+            }
+        }
+        XCTAssertTrue(sawFrame && sawNone, "有框 \(sawFrame)，没记 \(sawNone)")
+
+        // 关掉，别的用例不受影响（开关记在本机设置里）。
+        focusButton.tap()
+        XCTAssertFalse(zoomToFocus.waitForExistence(timeout: 1))
+        histogramButton.tap()
+        XCTAssertFalse(histogram.exists)
+    }
+
     /// 筛选 Pick，单张视图里改成 Reject：照片留在结果里；回网格点“刷新结果”才离开（F-22）。
     func testFilterKeepsResultUntilRefresh() {
         launch(autoAdvance: false)
