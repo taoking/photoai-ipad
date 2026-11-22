@@ -137,8 +137,10 @@ final class SingleViewUITests: XCTestCase {
     /// 筛选 Pick，单张视图里改成 Reject：照片留在结果里；回网格点“刷新结果”才离开（F-22）。
     func testFilterKeepsResultUntilRefresh() {
         launch(autoAdvance: false)
+        app.buttons["筛选"].tap()
         app.buttons["Pick"].tap()
         XCTAssertTrue(waitFor(app.buttons["Pick"], value: "已选"))
+        app.otherElements["PopoverDismissRegion"].tap()
         XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 5))
         openFirst()
         let total = pageIndex.components(separatedBy: " / ").last ?? ""
@@ -153,6 +155,7 @@ final class SingleViewUITests: XCTestCase {
         XCTAssertFalse(refresh.waitForExistence(timeout: 1))
         // 收尾：撤销 Reject（照片回到 Pick），清除筛选。
         app.buttons["撤销"].tap()
+        app.buttons["筛选"].tap()
         let clear = app.buttons["清除筛选"]
         let hittable = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: clear)
         if XCTWaiter().wait(for: [hittable], timeout: 3) != .completed {

@@ -2,7 +2,7 @@ import PhotoAICore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 设置（F-50）：存储用量、自动前进、导出、清卡、诊断。
+/// 设置（F-50）：存储卡、存储用量、自动前进、导出、清卡、诊断。
 struct SettingsView: View {
     @Bindable var model: AppModel
     @State private var usage: StorageUsage?
@@ -11,6 +11,19 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    LabeledContent("状态", value: model.cardStatusText)
+                    Button("读取存储卡") {
+                        // 选卡的“文件”选择器挂在主界面上，先关掉设置再读。
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.readCardTapped() }
+                    }
+                    .disabled(model.importer.isRunning || model.exports.isRunning)
+                } header: {
+                    Text("存储卡")
+                } footer: {
+                    Text("插上卡就自动读，一般不用点。第一次用、或者一直读不到卡时点这里，在“文件”里选存储卡。")
+                }
                 Section("存储") {
                     LabeledContent("照片", value: "\(model.stats.photoCount) 张")
                     if let usage {

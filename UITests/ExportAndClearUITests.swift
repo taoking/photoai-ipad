@@ -36,9 +36,17 @@ final class ExportAndClearUITests: XCTestCase {
 
     /// 设置里看存储用量、进清卡检查（不真的清）。
     func testSettingsAndClearCheck() {
-        app.buttons["设置"].tap()
+        // 设置在侧栏顶上。
+        let settings = app.buttons["设置"]
+        if !settings.exists { app.buttons["显示边栏"].firstMatch.tap() }
+        XCTAssertTrue(settings.waitForExistence(timeout: 3))
+        settings.tap()
+        XCTAssertTrue(app.buttons["读取存储卡"].waitForExistence(timeout: 3))
         XCTAssertTrue(text("10000 张").waitForExistence(timeout: 3))
-        app.buttons["清卡…"].tap()
+        // 上面加了“存储卡”一节，清卡要往下翻才看得到。
+        let clear = app.buttons["清卡…"]
+        if !clear.exists { app.swipeUp() }
+        clear.tap()
         XCTAssertTrue(text("选过但没导出").waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["清卡"].isEnabled)
         app.buttons["清卡"].tap()

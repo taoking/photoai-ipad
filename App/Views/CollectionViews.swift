@@ -45,7 +45,7 @@ struct CollectionButton: View {
     }
 }
 
-/// 侧栏里的收藏夹一节：每个收藏夹一行（按住改名、删除），最后一行“新建收藏夹”。
+/// 侧栏里的收藏夹一节：每个收藏夹一行（按住导出、改名、删除），最后一行“新建收藏夹”。
 struct SidebarCollections: View {
     let model: AppModel
 
@@ -63,6 +63,8 @@ struct SidebarCollections: View {
                 }
                 .tag(SidebarItem.collection(record.id))
                 .contextMenu {
+                    ExportItemButton(model: model, item: .collection(record.id))
+                    Divider()
                     Button("改名…", systemImage: "pencil") { model.collectionPrompt = .rename(record) }
                     Button("删除…", systemImage: "trash", role: .destructive) { model.collectionToDelete = record }
                 }
