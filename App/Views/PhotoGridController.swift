@@ -6,14 +6,19 @@ import UIKit
 ///
 /// - 捏合改每行几张（2–12），记在 UserDefaults；
 /// - 轻点打开；“选择”进入多选：轻点切换，横着拖过去连选（也支持系统的两指拖选），拖到上下边缘自动滚；
-/// - 数据变了只重新配置内容变了的格子，导入时网格不闪。
+/// - 数据变了只重新配置内容变了的格子，导入时网格不闪；只是星级、标记变了（照片和顺序没变）时不重做快照，
+///   直接改看得见的格子（PF-6）。
 @MainActor
 final class PhotoGridController: UIViewController, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching,
     UIGestureRecognizerDelegate {
-    var onOpen: ((PhotoSummary) -> Void)?
+    var onOpen: ((PhotoID) -> Void)?
     var onSelectionChanged: ((Set<PhotoID>) -> Void)?
     var onBeginSelecting: (() -> Void)?
     var onShowedPhotos: (() -> Void)?
+    var undo: (() -> Void)?
+    var redo: (() -> Void)?
+    /// 三指滑动撤销、重做走第一响应者的 `undoManager`（F-23）。
+    var modelUndoManager: UndoManager?
 
     let cache: ThumbnailCache
     private var collectionView: UICollectionView!
@@ -21,6 +26,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
     private var photosByID: [PhotoID: PhotoSummary] = [:]
     /// 上次换上的数据：只是选择变了（每点一下都会来）时不重做 1 万条的快照。
     private var appliedPhotos: [PhotoSummary] = []
+    private var appliedIDs: [PhotoID] = []
     private var sectionTitles: [String: String] = [:]
     private var hasAppliedOnce = false
     private var isSelecting = false
@@ -34,6 +40,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
     private var lastPanLocation: CGPoint = .zero
 
     private let frameMonitor = FrameMonitor()
+    private var prefetchTasks: [PhotoID: Task<Void, Never>] = [:]
 
     init(cache: ThumbnailCache) {
         self.cache = cache
@@ -65,6 +72,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PhotoCell.reuseID, for: indexPath) as! PhotoCell
             if let self, let photo = self.photosByID[id] {
                 cell.isSelecting = self.isSelecting
+                cell.thumbSize = self.thumbSize
                 cell.configure(photo, cache: self.cache)
             }
             return cell
@@ -90,19 +98,68 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
         collectionView.panGestureRecognizer.require(toFail: pan)
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
+
+    override var canBecomeFirstResponder: Bool { true }
+    override var undoManager: UndoManager? { modelUndoManager }
+
+    override var keyCommands: [UIKeyCommand]? {
+        let undo = UIKeyCommand(title: "撤销", action: #selector(undoKey), input: "z", modifierFlags: .command)
+        let redo = UIKeyCommand(title: "重做", action: #selector(redoKey), input: "z", modifierFlags: [.command, .shift])
+        undo.wantsPriorityOverSystemBehavior = true
+        redo.wantsPriorityOverSystemBehavior = true
+        return [undo, redo]
+    }
+
+    @objc private func undoKey() { undo?() }
+    @objc private func redoKey() { redo?() }
+
     // MARK: - 数据
 
-    func update(photos: [PhotoSummary], isSelecting: Bool, selected: Set<PhotoID>) {
+    func update(photos: [PhotoSummary], isSelecting: Bool, selected: Set<PhotoID>, scrollTarget: PhotoID?) {
         guard isViewLoaded else { return }
         if !hasAppliedOnce || photos != appliedPhotos {
-            applyData(photos)
+            let ids = photos.map(\.id)
+            if hasAppliedOnce, ids == appliedIDs {
+                updateMarks(photos)
+            } else {
+                applyData(photos, ids: ids)
+            }
         }
         setSelecting(isSelecting)
         syncSelection(selected)
+        if let scrollTarget { scrollToPhoto(scrollTarget) }
     }
 
-    private func applyData(_ photos: [PhotoSummary]) {
+    /// 照片和顺序都没变（打星、标记、预览做好了）：只改内容变了的格子。
+    private func updateMarks(_ photos: [PhotoSummary]) {
+        var changed: Set<PhotoID> = []
+        for photo in photos where photosByID[photo.id] != photo {
+            photosByID[photo.id] = photo
+            changed.insert(photo.id)
+        }
         appliedPhotos = photos
+        guard !changed.isEmpty else { return }
+        for case let cell as PhotoCell in collectionView.visibleCells {
+            guard let id = cell.photoID, changed.contains(id), let photo = photosByID[id] else { continue }
+            cell.configure(photo, cache: cache)
+        }
+    }
+
+    /// 从单张视图回来：那一张不在屏幕上就滚过去。
+    private func scrollToPhoto(_ id: PhotoID) {
+        guard let indexPath = dataSource.indexPath(for: id) else { return }
+        if !collectionView.indexPathsForVisibleItems.contains(indexPath) {
+            collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
+        }
+    }
+
+    private func applyData(_ photos: [PhotoSummary], ids: [PhotoID]) {
+        appliedPhotos = photos
+        appliedIDs = ids
         var order: [String] = []
         var items: [String: [PhotoID]] = [:]
         var byID: [PhotoID: PhotoSummary] = [:]
@@ -181,6 +238,21 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
 
     // MARK: - 布局
 
+    /// 格子的边长（像素）决定缩略图解码到哪一档（PF-2）。
+    private var thumbSize: ThumbnailCache.Size {
+        let width = (collectionView?.bounds.width ?? view.bounds.width) - 16
+        return .fitting(pixels: width / CGFloat(columns) * (view.window?.screen.scale ?? 2))
+    }
+
+    private func refreshVisibleCells() {
+        let size = thumbSize
+        for case let cell as PhotoCell in collectionView.visibleCells {
+            guard let id = cell.photoID, let photo = photosByID[id], cell.thumbSize != size else { continue }
+            cell.thumbSize = size
+            cell.configure(photo, cache: cache)
+        }
+    }
+
     private func makeLayout() -> UICollectionViewLayout {
         let columns = columns
         return UICollectionViewCompositionalLayout { _, _ in
@@ -217,6 +289,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
             UserDefaults.standard.set(columns, forKey: DefaultsKey.gridColumns)
             collectionView.setCollectionViewLayout(makeLayout(), animated: false)
             if let anchor { collectionView.scrollToItem(at: anchor, at: .centeredVertically, animated: false) }
+            refreshVisibleCells()
         default:
             break
         }
@@ -230,7 +303,7 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
             return
         }
         collectionView.deselectItem(at: indexPath, animated: false)
-        if let id = dataSource.itemIdentifier(for: indexPath), let photo = photosByID[id] { onOpen?(photo) }
+        if let id = dataSource.itemIdentifier(for: indexPath) { onOpen?(id) }
     }
 
     func collectionView(_ collectionView: UICollectionView, didDeselectItemAt indexPath: IndexPath) {
@@ -249,10 +322,22 @@ final class PhotoGridController: UIViewController, UICollectionViewDelegate, UIC
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+        let size = thumbSize
         for indexPath in indexPaths {
             guard let id = dataSource.itemIdentifier(for: indexPath), photosByID[id]?.thumbState == .ready,
-                  cache.cached(id) == nil else { continue }
-            Task { [cache] in _ = await cache.load(id) }
+                  cache.cached(id, size: size) == nil, prefetchTasks[id] == nil else { continue }
+            prefetchTasks[id] = Task { [cache, weak self] in
+                _ = await cache.load(id, size: size)
+                self?.prefetchTasks[id] = nil
+            }
+        }
+    }
+
+    /// 快速滚过去、不会显示了：没开始的解码不做了。
+    func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+        for indexPath in indexPaths {
+            guard let id = dataSource.itemIdentifier(for: indexPath) else { continue }
+            prefetchTasks.removeValue(forKey: id)?.cancel()
         }
     }
 

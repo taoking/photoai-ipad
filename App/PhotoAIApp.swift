@@ -8,8 +8,8 @@ struct PhotoAIApp: App {
     var body: some Scene {
         WindowGroup {
             switch state {
-            case .ready(let model, let cache):
-                RootView(model: model, cache: cache)
+            case .ready(let model, let cache, let previews):
+                RootView(model: model, cache: cache, previews: previews)
             case .failed(let message):
                 ContentUnavailableView("库打不开", systemImage: "exclamationmark.triangle", description: Text(message))
             }
@@ -17,7 +17,7 @@ struct PhotoAIApp: App {
     }
 
     enum LaunchState {
-        case ready(AppModel, ThumbnailCache)
+        case ready(AppModel, ThumbnailCache, PreviewImageCache)
         case failed(String)
     }
 
@@ -25,7 +25,7 @@ struct PhotoAIApp: App {
     private static func makeState() -> LaunchState {
         do {
             let model = try AppModel()
-            return .ready(model, ThumbnailCache(store: model.previewStore))
+            return .ready(model, ThumbnailCache(store: model.previewStore), PreviewImageCache(store: model.previewStore))
         } catch {
             appLog("库打不开：\(error)")
             return .failed("\(error)")

@@ -12,7 +12,7 @@ final class GridUITests: XCTestCase {
     override func setUp() async throws {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["-useSyntheticLibrary", "YES"]
+        app.launchArguments = ["-useSyntheticLibrary", "YES", "-autoAdvance", "NO"]
         app.launch()
         XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 30))
     }
@@ -37,10 +37,11 @@ final class GridUITests: XCTestCase {
         XCTAssertTrue(app.buttons["选择"].waitForExistence(timeout: 2))
     }
 
-    func testOpenPreviewAndPinch() {
+    func testOpenSingleAndPinch() {
         grid.cells.element(boundBy: 0).tap()
-        XCTAssertTrue(app.buttons["关闭"].waitForExistence(timeout: 2))
-        app.buttons["关闭"].tap()
+        XCTAssertTrue(app.buttons["返回网格"].waitForExistence(timeout: 2))
+        app.buttons["返回网格"].tap()
+        XCTAssertTrue(app.buttons["选择"].waitForExistence(timeout: 2))
 
         grid.pinch(withScale: 2, velocity: 1)
         grid.pinch(withScale: 0.4, velocity: -1)
